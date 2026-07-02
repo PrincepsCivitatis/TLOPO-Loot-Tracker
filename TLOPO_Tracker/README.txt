@@ -1,6 +1,10 @@
 TLOPO LOOT TRACKER - HOW TO USE THIS
 =====================================
 
+Note: this README file (only this file, not the application itself)
+was written with AI assistance.
+
+
 This little program sits on your screen while you play The Legend of
 Pirates Online. It watches for the loot popup window that appears when
 you open a chest, reads what's inside it, and keeps track of everything
