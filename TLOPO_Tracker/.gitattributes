@@ -1,0 +1,7 @@
+# Shell scripts must always keep LF line endings, even when checked out
+# on Windows -- CRLF in a shebang line breaks execution on macOS/Linux
+# ("bad interpreter" errors).
+*.sh text eol=lf
+
+# Windows batch files are only ever run on Windows, so CRLF is fine/expected.
+*.bat text eol=crlf
