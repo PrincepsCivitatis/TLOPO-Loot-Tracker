@@ -189,6 +189,16 @@ MIN_REGION_FRACTION = 0.01  # candidate region must cover at least 1% of screen 
 # popup gets re-detected as a "new" one a moment later and double-logged.
 ABSENCE_CONFIRM_SECONDS = 1.2
 
+# EasyOCR (like most OCR engines) reads small text much less reliably
+# than larger text -- game UI text captured at native resolution is
+# often small enough that individual letters get confused with similar-
+# looking ones. Upscaling the image before handing it to OCR is the
+# single most effective lever for this. This does make each OCR read
+# slower (more pixels to process), which matters more the lower the
+# polling interval is set -- if OCR reads start feeling sluggish after
+# raising this, that's the tradeoff to weigh against accuracy.
+OCR_UPSCALE_FACTOR = 2.0
+
 
 @dataclass
 class DetectorSettings:
@@ -340,7 +350,13 @@ class LootDetector:
         try:
             with mss.mss() as sct:
                 while not self._stop_event.is_set():
-                    interval = max(0.1, self.settings.poll_interval_ms / 1000.0)
+                    # Floor matches MIN_POLL_INTERVAL_MS in tlopo_tracker.py
+                    # (lowered from an earlier 100ms floor per GitHub issue
+                    # #3 -- fast-looting playstyles can open/close loot
+                    # containers faster than that allowed detection to
+                    # catch). Very low values increase CPU usage since each
+                    # cycle does real screenshot + image-matching work.
+                    interval = max(0.01, self.settings.poll_interval_ms / 1000.0)
 
                     if self._pause_event.is_set():
                         self.on_status_change("Waiting for TLOPO...")
@@ -723,12 +739,25 @@ class LootDetector:
     # OCR helpers
     # ------------------------------------------------------------------
     def _ocr_lines_with_boxes(self, crop: np.ndarray) -> List[Tuple[str, tuple]]:
-        """Returns list of (text, bounding_box) using easyocr. bounding_box
-        is (x1, y1, x2, y2) relative to `crop`."""
+        """
+        Returns list of (text, bounding_box) using easyocr. bounding_box
+        is (x1, y1, x2, y2) relative to `crop` at its ORIGINAL resolution
+        -- OCR itself runs on an upscaled copy for better accuracy on
+        small text (see OCR_UPSCALE_FACTOR), but the returned boxes are
+        scaled back down so every caller can keep treating coordinates
+        as relative to the original, unscaled crop with no other changes
+        needed.
+        """
         if crop.size == 0 or self._ocr_reader is None:
             return []
         try:
-            results = self._ocr_reader.readtext(crop)
+            from PIL import Image
+            h, w = crop.shape[0], crop.shape[1]
+            upscaled_img = Image.fromarray(crop).resize(
+                (max(1, int(w * OCR_UPSCALE_FACTOR)), max(1, int(h * OCR_UPSCALE_FACTOR))),
+                Image.LANCZOS,
+            )
+            results = self._ocr_reader.readtext(np.array(upscaled_img))
         except Exception:
             return []
 
@@ -736,8 +765,8 @@ class LootDetector:
         for bbox, text, conf in results:
             if conf < 0.35:
                 continue
-            xs = [p[0] for p in bbox]
-            ys = [p[1] for p in bbox]
+            xs = [p[0] / OCR_UPSCALE_FACTOR for p in bbox]
+            ys = [p[1] / OCR_UPSCALE_FACTOR for p in bbox]
             box = (int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)))
             out.append((text, box))
         return out

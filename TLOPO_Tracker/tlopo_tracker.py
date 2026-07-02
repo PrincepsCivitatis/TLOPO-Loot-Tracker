@@ -21,7 +21,7 @@ from datetime import datetime
 from tkinter import (
     Tk, Toplevel, Frame, Label, Button, Entry, StringVar, IntVar,
     Listbox, Scrollbar, Text, END, DISABLED, NORMAL, messagebox, ttk, BOTH,
-    LEFT, RIGHT, X, Y, VERTICAL, HORIZONTAL, W, E,
+    LEFT, RIGHT, TOP, BOTTOM, X, Y, VERTICAL, HORIZONTAL, W, E,
     Checkbutton, BooleanVar, Scale,
 )
 
@@ -35,6 +35,14 @@ from detector import LootDetector, DetectorSettings, DEFAULT_PARCHMENT_RGB, DEFA
 
 APP_TITLE = "TLOPO Loot Tracker"
 WINDOW_W, WINDOW_H = 440, 750
+
+# Detection polling interval bounds. Lowered from an earlier 200ms floor
+# per player feedback (GitHub issue #3) -- fast-looting playstyles (e.g.
+# bilge farming, or aggro-then-burst strategies that drop many chests
+# at once) can open/close containers faster than 200ms allowed the
+# tracker to catch. See detector.py for the matching backend floor.
+MIN_POLL_INTERVAL_MS = 10
+MAX_POLL_INTERVAL_MS = 5000
 
 PRESET_TARGETS = [
     "Palifico", "Crash", "Koleniko", "Neban the Silent", "Jimmy Legs",
@@ -666,29 +674,74 @@ class TLOPOTrackerApp:
         win = Toplevel(self.root)
         win.title("Settings")
         win.configure(bg=BG)
-        win.geometry("400x760")
+        win.geometry("420x600")
+        win.minsize(360, 300)
         win.attributes("-topmost", True)
 
-        Label(win, text="Detection polling interval (ms)", bg=BG, fg=FG).pack(anchor=W, padx=10, pady=(12, 0))
-        poll_var = IntVar(value=self.settings.get("poll_interval_ms", 500))
-        Scale(win, from_=200, to=3000, orient=HORIZONTAL, variable=poll_var, bg=BG, fg=FG,
-              troughcolor=PANEL_BG, length=340).pack(padx=10)
+        # Pinned button area, reserved at the bottom BEFORE the scrollable
+        # canvas below is packed, so "Save" always stays visible without
+        # needing to scroll down to it -- the actual button widget is
+        # added into this frame further down, once save_and_close exists.
+        button_frame = Frame(win, bg=BG)
+        button_frame.pack(side=BOTTOM, fill=X)
+
+        # The settings content is taller than fits in a reasonable window
+        # size (especially with the per-rarity color sliders), and this
+        # dialog previously had no way to scroll, so lower settings like
+        # the export folder were unreachable. Same scrollable canvas
+        # pattern used for the main tracker window (see _build_ui).
+        import tkinter as tk
+
+        canvas_frame = Frame(win, bg=BG)
+        canvas_frame.pack(side=TOP, fill=BOTH, expand=True)
+
+        settings_canvas = tk.Canvas(canvas_frame, bg=BG, highlightthickness=0)
+        vscroll = Scrollbar(canvas_frame, orient=VERTICAL, command=settings_canvas.yview)
+        settings_canvas.configure(yscrollcommand=vscroll.set)
+        vscroll.pack(side=RIGHT, fill=Y)
+        settings_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+
+        parent = Frame(settings_canvas, bg=BG)
+        canvas_window = settings_canvas.create_window((0, 0), window=parent, anchor="nw")
+
+        def _on_configure(_evt):
+            settings_canvas.configure(scrollregion=settings_canvas.bbox("all"))
+        parent.bind("<Configure>", _on_configure)
+
+        def _on_canvas_resize(evt):
+            settings_canvas.itemconfig(canvas_window, width=evt.width)
+        settings_canvas.bind("<Configure>", _on_canvas_resize)
+
+        def _on_mousewheel(evt):
+            settings_canvas.yview_scroll(int(-1 * (evt.delta / 120)), "units")
+        # Bound to the canvas itself (not bind_all) so this only scrolls
+        # while the mouse is over the Settings dialog, and doesn't hijack
+        # mouse-wheel scrolling on the main tracker window behind it.
+        settings_canvas.bind("<MouseWheel>", _on_mousewheel)
+
+        Label(parent, text="Detection polling interval (ms)", bg=BG, fg=FG).pack(anchor=W, padx=10, pady=(12, 0))
+        Label(parent, text=f"Type a number ({MIN_POLL_INTERVAL_MS}-{MAX_POLL_INTERVAL_MS}). Lower catches\n"
+                            "loot faster but taxes your system more -- each check does real\n"
+                            "screenshot + image work, so very low values raise CPU usage.",
+              bg=BG, fg=GREY, justify=LEFT, font=("Segoe UI", 8)).pack(anchor=W, padx=10)
+        poll_var = StringVar(value=str(self.settings.get("poll_interval_ms", 500)))
+        Entry(parent, textvariable=poll_var, width=10).pack(anchor=W, padx=10, pady=(2, 0))
 
         hide_common_var = BooleanVar(value=self.settings.get("hide_common", True))
-        Checkbutton(win, text="Hide Common items in loot log", variable=hide_common_var,
+        Checkbutton(parent, text="Hide Common items in loot log", variable=hide_common_var,
                     bg=BG, fg=FG, selectcolor=PANEL_BG, activebackground=BG).pack(anchor=W, padx=10, pady=(8, 0))
 
         hide_uncommon_var = BooleanVar(value=self.settings.get("hide_uncommon", False))
-        Checkbutton(win, text="Hide Uncommon items in loot log", variable=hide_uncommon_var,
+        Checkbutton(parent, text="Hide Uncommon items in loot log", variable=hide_uncommon_var,
                     bg=BG, fg=FG, selectcolor=PANEL_BG, activebackground=BG).pack(anchor=W, padx=10)
 
-        Label(win, text="HSV Hue Center per Rarity (0-360)", bg=BG, fg=FG,
+        Label(parent, text="HSV Hue Center per Rarity (0-360)", bg=BG, fg=FG,
               font=("Segoe UI", 9, "bold")).pack(anchor=W, padx=10, pady=(14, 2))
 
         hsv_targets = copy.deepcopy(self.settings.get("hsv_targets", DEFAULT_HSV_TARGETS))
         hue_vars = {}
         for rarity in RARITY_ORDER:
-            row = Frame(win, bg=BG)
+            row = Frame(parent, bg=BG)
             row.pack(fill=X, padx=10, pady=2)
             Label(row, text=rarity, width=10, anchor=W, bg=BG, fg=RARITY_DISPLAY_HEX[rarity]).pack(side=LEFT)
             v = IntVar(value=hsv_targets.get(rarity, {}).get("h", 0))
@@ -696,19 +749,19 @@ class TLOPOTrackerApp:
             Scale(row, from_=0, to=360, orient=HORIZONTAL, variable=v, bg=BG, fg=FG,
                   troughcolor=PANEL_BG, length=220).pack(side=LEFT)
 
-        Label(win, text="Loot Window Background Color (Parchment)", bg=BG, fg=FG,
+        Label(parent, text="Loot Window Background Color (Parchment)", bg=BG, fg=FG,
               font=("Segoe UI", 9, "bold")).pack(anchor=W, padx=10, pady=(14, 2))
-        Label(win, text="If chests are never detected at all (not even briefly flashing\n"
-                         "\"Loot window detected\"), this color likely doesn't match your\n"
-                         "game. Use tools/color_sampler.py on a screenshot of an open\n"
-                         "loot popup to find the right numbers -- this matters most for\n"
-                         "Mac, where rendering hasn't been tested.",
+        Label(parent, text="If chests are never detected at all (not even briefly flashing\n"
+                            "\"Loot window detected\"), this color likely doesn't match your\n"
+                            "game. Use tools/color_sampler.py on a screenshot of an open\n"
+                            "loot popup to find the right numbers -- this matters most for\n"
+                            "Mac, where rendering hasn't been tested.",
               bg=BG, fg=GREY, justify=LEFT, font=("Segoe UI", 8)).pack(anchor=W, padx=10)
 
         parchment_rgb = list(self.settings.get("parchment_rgb", DEFAULT_PARCHMENT_RGB))
         parchment_vars = []
         for i, channel in enumerate(["Red", "Green", "Blue"]):
-            row = Frame(win, bg=BG)
+            row = Frame(parent, bg=BG)
             row.pack(fill=X, padx=10, pady=2)
             Label(row, text=channel, width=10, anchor=W, bg=BG, fg=FG).pack(side=LEFT)
             v = IntVar(value=parchment_rgb[i])
@@ -716,20 +769,35 @@ class TLOPOTrackerApp:
             Scale(row, from_=0, to=255, orient=HORIZONTAL, variable=v, bg=BG, fg=FG,
                   troughcolor=PANEL_BG, length=220).pack(side=LEFT)
 
-        tol_row = Frame(win, bg=BG)
+        tol_row = Frame(parent, bg=BG)
         tol_row.pack(fill=X, padx=10, pady=2)
         Label(tol_row, text="Tolerance", width=10, anchor=W, bg=BG, fg=FG).pack(side=LEFT)
         parchment_tol_var = IntVar(value=self.settings.get("parchment_tolerance", DEFAULT_PARCHMENT_TOLERANCE))
         Scale(tol_row, from_=5, to=80, orient=HORIZONTAL, variable=parchment_tol_var, bg=BG, fg=FG,
               troughcolor=PANEL_BG, length=220).pack(side=LEFT)
 
-        Label(win, text="Export folder", bg=BG, fg=FG,
+        Label(parent, text="Export folder", bg=BG, fg=FG,
               font=("Segoe UI", 9, "bold")).pack(anchor=W, padx=10, pady=(14, 2))
         folder_var = StringVar(value=self.settings.get("export_folder", default_export_folder()))
-        Entry(win, textvariable=folder_var, width=48).pack(padx=10)
+        Entry(parent, textvariable=folder_var, width=48).pack(padx=10, pady=(0, 16))
 
         def save_and_close():
-            self.settings["poll_interval_ms"] = poll_var.get()
+            try:
+                poll_ms = int(poll_var.get().strip())
+            except (ValueError, AttributeError):
+                messagebox.showwarning(
+                    APP_TITLE, f"Polling interval must be a whole number between "
+                               f"{MIN_POLL_INTERVAL_MS} and {MAX_POLL_INTERVAL_MS}."
+                )
+                return
+            if not (MIN_POLL_INTERVAL_MS <= poll_ms <= MAX_POLL_INTERVAL_MS):
+                messagebox.showwarning(
+                    APP_TITLE, f"Polling interval must be between "
+                               f"{MIN_POLL_INTERVAL_MS} and {MAX_POLL_INTERVAL_MS} ms."
+                )
+                return
+
+            self.settings["poll_interval_ms"] = poll_ms
             self.settings["hide_common"] = hide_common_var.get()
             self.settings["hide_uncommon"] = hide_uncommon_var.get()
             self.settings["export_folder"] = folder_var.get().strip() or default_export_folder()
@@ -751,7 +819,16 @@ class TLOPOTrackerApp:
                 self.detector.settings.parchment_tolerance = self.settings["parchment_tolerance"]
             win.destroy()
 
-        Button(win, text="Save", command=save_and_close, bg=ACCENT, fg="#20242b",
+        # Closing the dialog via the window's own close button (instead of
+        # clicking "Save") used to silently discard every change with no
+        # feedback -- Tk's default close behavior just destroys the window.
+        # That was reported as settings "resetting" every time the dialog
+        # was reopened, when really they were never being saved at all.
+        # Routing the close button through the same save-and-validate path
+        # fixes this: any way of closing the dialog now persists changes.
+        win.protocol("WM_DELETE_WINDOW", save_and_close)
+
+        Button(button_frame, text="Save", command=save_and_close, bg=ACCENT, fg="#20242b",
                relief="flat", cursor="hand2").pack(pady=16)
 
     # ------------------------------------------------------------------
