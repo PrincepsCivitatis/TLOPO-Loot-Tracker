@@ -25,12 +25,18 @@ from loot_parser import (
     normalize_chest_type,
 )
 
-# Parchment background color, RGB. Measured directly from a real TLOPO
-# loot popup screenshot via tools/color_sampler.py (the spec's rough
-# estimate of 210,185,140 was off by ~40 on the blue channel, which
-# caused every frame to fail matching).
-PARCHMENT_RGB = np.array([204, 172, 100])
-PARCHMENT_TOLERANCE = 30  # per-channel tolerance
+# Default parchment background color, RGB. Measured directly from a real
+# TLOPO loot popup screenshot on Windows via tools/color_sampler.py (the
+# spec's rough estimate of 210,185,140 was off by ~40 on the blue
+# channel, which caused every frame to fail matching).
+#
+# This is only a DEFAULT -- different platforms/graphics drivers/color
+# profiles (Mac in particular, since this has never been tested there)
+# may render the game with slightly different colors. Users can
+# recalibrate this without editing code via the Settings panel; see
+# README.txt "IF SOMETHING ISN'T WORKING" / "MAC USERS" sections.
+DEFAULT_PARCHMENT_RGB = (204, 172, 100)
+DEFAULT_PARCHMENT_TOLERANCE = 30  # per-channel tolerance
 
 # Minimum contiguous parchment-colored region (in pixels) to consider as a
 # candidate loot window, scaled for a 3840x2160 screen. Games at lower
@@ -51,6 +57,8 @@ class DetectorSettings:
     poll_interval_ms: int = 500
     post_close_cooldown_s: float = 2.0
     hsv_targets: Optional[dict] = None  # overrides loot_parser.DEFAULT_HSV_TARGETS
+    parchment_rgb: Optional[Tuple[int, int, int]] = None       # overrides DEFAULT_PARCHMENT_RGB
+    parchment_tolerance: Optional[int] = None                  # overrides DEFAULT_PARCHMENT_TOLERANCE
 
 
 class LootDetector:
@@ -259,10 +267,17 @@ class LootDetector:
     # ------------------------------------------------------------------
     # Window region detection (color-based, resolution independent)
     # ------------------------------------------------------------------
-    @staticmethod
-    def _parchment_mask(frame: np.ndarray) -> np.ndarray:
-        diff = np.abs(frame.astype(np.int16) - PARCHMENT_RGB.astype(np.int16))
-        return np.all(diff <= PARCHMENT_TOLERANCE, axis=-1)
+    def _effective_parchment_rgb_tolerance(self) -> Tuple[np.ndarray, int]:
+        rgb = self.settings.parchment_rgb
+        rgb = np.array(rgb if rgb is not None else DEFAULT_PARCHMENT_RGB)
+        tolerance = self.settings.parchment_tolerance
+        tolerance = tolerance if tolerance is not None else DEFAULT_PARCHMENT_TOLERANCE
+        return rgb, tolerance
+
+    def _parchment_mask(self, frame: np.ndarray) -> np.ndarray:
+        rgb, tolerance = self._effective_parchment_rgb_tolerance()
+        diff = np.abs(frame.astype(np.int16) - rgb.astype(np.int16))
+        return np.all(diff <= tolerance, axis=-1)
 
     @staticmethod
     def _region_still_present(mask: np.ndarray, box: Tuple[int, int, int, int]) -> bool:
@@ -541,7 +556,8 @@ class LootDetector:
         if sub.size == 0:
             return None
 
-        diff = np.abs(sub - PARCHMENT_RGB.astype(np.int16)).sum(axis=-1)
+        rgb, _tolerance = self._effective_parchment_rgb_tolerance()
+        diff = np.abs(sub - rgb.astype(np.int16)).sum(axis=-1)
         threshold = np.percentile(diff, 70)
         text_mask = diff >= max(threshold, 40)
 

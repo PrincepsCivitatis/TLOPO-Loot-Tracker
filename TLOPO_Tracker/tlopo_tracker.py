@@ -31,7 +31,7 @@ from loot_parser import (
 )
 from session import Session
 from exporter import export_to_excel, export_to_text, default_export_folder
-from detector import LootDetector, DetectorSettings
+from detector import LootDetector, DetectorSettings, DEFAULT_PARCHMENT_RGB, DEFAULT_PARCHMENT_TOLERANCE
 
 APP_TITLE = "TLOPO Loot Tracker"
 WINDOW_W, WINDOW_H = 440, 750
@@ -108,6 +108,8 @@ class TLOPOTrackerApp:
             settings=DetectorSettings(
                 poll_interval_ms=self.settings.get("poll_interval_ms", 500),
                 hsv_targets=self.settings.get("hsv_targets", DEFAULT_HSV_TARGETS),
+                parchment_rgb=tuple(self.settings.get("parchment_rgb", DEFAULT_PARCHMENT_RGB)),
+                parchment_tolerance=self.settings.get("parchment_tolerance", DEFAULT_PARCHMENT_TOLERANCE),
             ),
         )
         self.detector.active_target_getter = lambda: self.session.active_target or ""
@@ -150,6 +152,8 @@ class TLOPOTrackerApp:
             "hide_common": True,
             "hide_uncommon": False,
             "hsv_targets": copy.deepcopy(DEFAULT_HSV_TARGETS),
+            "parchment_rgb": list(DEFAULT_PARCHMENT_RGB),
+            "parchment_tolerance": DEFAULT_PARCHMENT_TOLERANCE,
             "export_folder": default_export_folder(),
         }
         path = self._settings_path()
@@ -662,7 +666,7 @@ class TLOPOTrackerApp:
         win = Toplevel(self.root)
         win.title("Settings")
         win.configure(bg=BG)
-        win.geometry("380x480")
+        win.geometry("400x760")
         win.attributes("-topmost", True)
 
         Label(win, text="Detection polling interval (ms)", bg=BG, fg=FG).pack(anchor=W, padx=10, pady=(12, 0))
@@ -692,6 +696,33 @@ class TLOPOTrackerApp:
             Scale(row, from_=0, to=360, orient=HORIZONTAL, variable=v, bg=BG, fg=FG,
                   troughcolor=PANEL_BG, length=220).pack(side=LEFT)
 
+        Label(win, text="Loot Window Background Color (Parchment)", bg=BG, fg=FG,
+              font=("Segoe UI", 9, "bold")).pack(anchor=W, padx=10, pady=(14, 2))
+        Label(win, text="If chests are never detected at all (not even briefly flashing\n"
+                         "\"Loot window detected\"), this color likely doesn't match your\n"
+                         "game. Use tools/color_sampler.py on a screenshot of an open\n"
+                         "loot popup to find the right numbers -- this matters most for\n"
+                         "Mac, where rendering hasn't been tested.",
+              bg=BG, fg=GREY, justify=LEFT, font=("Segoe UI", 8)).pack(anchor=W, padx=10)
+
+        parchment_rgb = list(self.settings.get("parchment_rgb", DEFAULT_PARCHMENT_RGB))
+        parchment_vars = []
+        for i, channel in enumerate(["Red", "Green", "Blue"]):
+            row = Frame(win, bg=BG)
+            row.pack(fill=X, padx=10, pady=2)
+            Label(row, text=channel, width=10, anchor=W, bg=BG, fg=FG).pack(side=LEFT)
+            v = IntVar(value=parchment_rgb[i])
+            parchment_vars.append(v)
+            Scale(row, from_=0, to=255, orient=HORIZONTAL, variable=v, bg=BG, fg=FG,
+                  troughcolor=PANEL_BG, length=220).pack(side=LEFT)
+
+        tol_row = Frame(win, bg=BG)
+        tol_row.pack(fill=X, padx=10, pady=2)
+        Label(tol_row, text="Tolerance", width=10, anchor=W, bg=BG, fg=FG).pack(side=LEFT)
+        parchment_tol_var = IntVar(value=self.settings.get("parchment_tolerance", DEFAULT_PARCHMENT_TOLERANCE))
+        Scale(tol_row, from_=5, to=80, orient=HORIZONTAL, variable=parchment_tol_var, bg=BG, fg=FG,
+              troughcolor=PANEL_BG, length=220).pack(side=LEFT)
+
         Label(win, text="Export folder", bg=BG, fg=FG,
               font=("Segoe UI", 9, "bold")).pack(anchor=W, padx=10, pady=(14, 2))
         folder_var = StringVar(value=self.settings.get("export_folder", default_export_folder()))
@@ -709,10 +740,15 @@ class TLOPOTrackerApp:
                 hsv_targets[rarity].setdefault("v", DEFAULT_HSV_TARGETS[rarity]["v"])
                 hsv_targets[rarity].setdefault("tolerance", DEFAULT_HSV_TARGETS[rarity]["tolerance"])
             self.settings["hsv_targets"] = hsv_targets
+            new_parchment_rgb = [v.get() for v in parchment_vars]
+            self.settings["parchment_rgb"] = new_parchment_rgb
+            self.settings["parchment_tolerance"] = parchment_tol_var.get()
             self._save_settings()
             if self.detector:
                 self.detector.settings.poll_interval_ms = self.settings["poll_interval_ms"]
                 self.detector.settings.hsv_targets = hsv_targets
+                self.detector.settings.parchment_rgb = tuple(new_parchment_rgb)
+                self.detector.settings.parchment_tolerance = self.settings["parchment_tolerance"]
             win.destroy()
 
         Button(win, text="Save", command=save_and_close, bg=ACCENT, fg="#20242b",

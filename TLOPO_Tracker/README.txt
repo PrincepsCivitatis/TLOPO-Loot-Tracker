@@ -136,17 +136,65 @@ carry across your whole session, no matter how many targets you farm.
 
 8. IF SOMETHING ISN'T WORKING
 --------------------------------
-- If chests aren't being detected: make sure the game window is
-  visible on screen (not minimized) and try opening a chest again.
-- If item rarities look wrong: click the gear icon (Settings) in the
-  top-right of the tracker and adjust the color sliders slightly.
+- If chests aren't being detected AT ALL (the status bar never even
+  briefly says "Loot window detected"): this almost always means the
+  tracker's idea of the loot popup's background color doesn't match
+  how your game actually renders it. See "8B. FIXING COLOR DETECTION"
+  below - this is the most likely thing to need adjusting on a Mac,
+  since colors have never been confirmed to render identically there.
+- If item rarities look wrong (a Common item logged as Rare, etc.):
+  click the gear icon (Settings) in the top-right of the tracker and
+  adjust the rarity color sliders slightly.
 - If item names are misspelled or garbled: open Settings and increase
   the "Detection polling interval" slightly - this gives the reading
   engine a bit more time and can improve accuracy.
 - If the tracker window ever crashes, just double-click
-  START_TRACKER.bat again. Your session is automatically saved every
-  minute, and the tracker will offer to restore it when it reopens
-  (as long as it's been less than 8 hours).
+  START_TRACKER.bat again (or re-run start_tracker.sh on Mac). Your
+  session is automatically saved every minute, and the tracker will
+  offer to restore it when it reopens (as long as it's been less than
+  8 hours).
+
+
+8B. FIXING COLOR DETECTION (ESPECIALLY FOR MAC)
+---------------------------------------------------
+The tracker finds the loot popup by looking for its tan/parchment
+background color, then reads item rarity by the color of each item's
+text. These colors were measured from a real screenshot on Windows -
+if your computer renders the game with even slightly different colors
+(different monitor, color profile, or - especially on Mac, since this
+hasn't been tested there yet - a different graphics path), detection
+can fail completely, or pick the wrong rarity for items.
+
+How to tell which one is happening:
+  - Chests are NEVER detected, not even briefly: the background
+    (parchment) color needs fixing.
+  - Chests ARE detected and logged, but the rarity (color) looks
+    wrong for some items: the per-rarity colors need fixing instead.
+
+How to find the right colors:
+  1. Take a screenshot while a loot popup is open on screen.
+       Windows: press the Windows key + Shift + S, or Print Screen.
+       Mac: press Command + Shift + 4, then drag over the area (or
+       Command + Shift + 3 for the whole screen). Save it as an image
+       file (PNG).
+  2. Run the color sampler tool on that screenshot:
+       Windows: drag the screenshot file onto
+                tools\run_color_sampler.bat
+       Mac:     open Terminal in the tracker folder and run
+                bash tools/run_color_sampler.sh /path/to/screenshot.png
+  3. A list of colors will print out, largest area first (as a
+     percentage of the image). The tan parchment background will
+     usually be one of the first few entries. If you want the color
+     of a specific item's text instead, look further down the list
+     for a color that matches what you saw on screen.
+  4. Open the tracker, click the gear icon (Settings), and scroll to
+     "Loot Window Background Color (Parchment)". Set the Red/Green/
+     Blue sliders to the numbers you found, click Save, and try again.
+     (The per-rarity color sliders further up work the same way, using
+     the color of an item's name text instead of the background.)
+
+You do not need to edit any code to do this - everything is adjustable
+from the Settings panel.
 
 
 9. STARTING FRESH
