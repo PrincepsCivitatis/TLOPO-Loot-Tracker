@@ -36,34 +36,40 @@ from loot_parser import (
 GAME_WINDOW_TITLE_SUBSTRING = "legend of pirates online"
 
 
-def _find_windows_game_window_rect(title_substring: str) -> Optional[Tuple[int, int, int, int]]:
+def _find_windows_game_windows(title_substring: str) -> List[Tuple[int, Tuple[int, int, int, int]]]:
     """
-    Windows-only: locate a visible top-level window whose title contains
-    title_substring (case-insensitive) and return its screen rectangle as
-    (left, top, width, height). Returns None if not on Windows, the
-    window isn't found, it's minimized (so callers correctly treat
-    "minimized" the same as "not running" and pause detection, per spec),
-    or it isn't the currently focused/foreground window.
+    Windows-only: locate every visible, non-minimized top-level window
+    whose title contains title_substring (case-insensitive), and return
+    a list of (hwnd, (left, top, width, height)) for each one that
+    appears to be genuinely visible on top at its own location (not
+    covered by some other window, like Discord dragged over it).
 
-    The foreground check matters because screen capture grabs whatever
-    pixels are on screen at a given rectangle -- knowing the game window's
-    *position* doesn't mean the game is what's actually visible there. If
-    another window (e.g. Discord) is dragged on top of the game, that
-    still counts as "inside the game's rectangle" positionally, but the
-    captured pixels would be Discord's, not the game's, and could be
-    misread as a loot popup. Requiring the game to be the foreground
-    window catches the common case of someone dragging another app over
-    it (which normally also focuses that other app). It does NOT catch
-    an overlay that renders on top without stealing focus (e.g. Discord's
-    own in-game overlay feature) -- reliably capturing a specific window's
-    contents regardless of what's drawn on top of it would require
-    per-window rendering capture (e.g. PrintWindow with
-    PW_RENDERFULLCONTENT), which often doesn't work correctly for
+    Returns a list rather than a single match so multiple simultaneous
+    TLOPO windows -- e.g. multiple characters logged in at once, each
+    in its own window -- are ALL tracked independently. An earlier
+    version of this function only ever considered the single OS-level
+    foreground/focused window, which meant that with two TLOPO windows
+    open, whichever one wasn't currently focused was invisible to
+    detection entirely, even though it might have its own loot popup
+    open. See GitHub issue #2.
+
+    Per-window occlusion is approximated by sampling several points
+    across the window's rectangle with WindowFromPoint and checking
+    that they resolve back to this window (via its top-level ancestor)
+    rather than some other app drawn on top of it there. This allows
+    multiple TLOPO windows to be considered valid at once (as long as
+    each is genuinely visible), while still rejecting a window that's
+    actually covered by something else -- see GitHub issue #1. It does
+    NOT catch an overlay that renders on top without stealing focus
+    (e.g. Discord's own in-game overlay feature) -- reliably capturing
+    a specific window's contents regardless of what's drawn on top of
+    it would require per-window rendering capture (e.g. PrintWindow
+    with PW_RENDERFULLCONTENT), which often doesn't work correctly for
     hardware-accelerated 3D game windows like this one and is out of
     scope here. This is a documented known limitation.
     """
     if platform.system() != "Windows":
-        return None
+        return []
     try:
         import ctypes
         import ctypes.wintypes as wintypes
@@ -75,6 +81,7 @@ def _find_windows_game_window_rect(title_substring: str) -> Optional[Tuple[int, 
         # guess the type of a plain Python int passed as an argument is a
         # classic source of handle-truncation bugs. Being explicit costs
         # nothing and removes that whole class of risk.
+        GA_ROOT = 2
         EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
         user32.EnumWindows.argtypes = [EnumWindowsProc, wintypes.LPARAM]
         user32.EnumWindows.restype = wintypes.BOOL
@@ -88,10 +95,12 @@ def _find_windows_game_window_rect(title_substring: str) -> Optional[Tuple[int, 
         user32.IsIconic.restype = wintypes.BOOL
         user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
         user32.GetWindowRect.restype = wintypes.BOOL
-        user32.GetForegroundWindow.argtypes = []
-        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.WindowFromPoint.argtypes = [wintypes.POINT]
+        user32.WindowFromPoint.restype = wintypes.HWND
+        user32.GetAncestor.argtypes = [wintypes.HWND, ctypes.c_uint]
+        user32.GetAncestor.restype = wintypes.HWND
 
-        found_hwnd = []
+        found_hwnds = []
 
         def _enum_callback(hwnd, _lparam):
             if not user32.IsWindowVisible(hwnd):
@@ -102,34 +111,57 @@ def _find_windows_game_window_rect(title_substring: str) -> Optional[Tuple[int, 
             buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buf, length + 1)
             if title_substring.lower() in buf.value.lower():
-                found_hwnd.append(hwnd)
-                return False  # stop enumerating, we found it
-            return True
+                found_hwnds.append(hwnd)
+            return True  # keep enumerating -- there may be more than one
 
         user32.EnumWindows(EnumWindowsProc(_enum_callback), 0)
 
-        if not found_hwnd:
-            return None
-        hwnd = found_hwnd[0]
+        results = []
+        for hwnd in found_hwnds:
+            if user32.IsIconic(hwnd):
+                continue  # minimized -- treat as "not running" for this window
 
-        if user32.IsIconic(hwnd):
-            return None  # minimized -- treat as "not running"
+            rect = wintypes.RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                continue
 
-        if user32.GetForegroundWindow() != hwnd:
-            return None  # something else is focused/on top -- don't trust this capture
+            left, top, right, bottom = rect.left, rect.top, rect.right, rect.bottom
+            width, height = right - left, bottom - top
+            if width <= 0 or height <= 0:
+                continue
 
-        rect = wintypes.RECT()
-        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-            return None
+            # Sample the center plus each quadrant's midpoint. Requiring a
+            # majority (rather than a single point) to resolve back to
+            # this window tolerates a small overlay covering part of the
+            # window (e.g. a corner notification) without treating the
+            # whole window as occluded, while still catching genuine
+            # full/majority occlusion (e.g. Discord dragged fully over it).
+            sample_points = [
+                (left + width // 2, top + height // 2),
+                (left + width // 4, top + height // 4),
+                (left + 3 * width // 4, top + height // 4),
+                (left + width // 4, top + 3 * height // 4),
+                (left + 3 * width // 4, top + 3 * height // 4),
+            ]
+            visible_hits = 0
+            for x, y in sample_points:
+                pt = wintypes.POINT(x, y)
+                hwnd_at_point = user32.WindowFromPoint(pt)
+                if not hwnd_at_point:
+                    continue
+                root = user32.GetAncestor(hwnd_at_point, GA_ROOT)
+                if root == hwnd:
+                    visible_hits += 1
 
-        left, top, right, bottom = rect.left, rect.top, rect.right, rect.bottom
-        width, height = right - left, bottom - top
-        if width <= 0 or height <= 0:
-            return None
-        return (left, top, width, height)
+            if visible_hits < 3:  # majority of 5 sample points
+                continue  # covered by something else -- don't trust this capture
+
+            results.append((hwnd, (left, top, width, height)))
+
+        return results
     except Exception as e:
         print(f"[TLOPO detect] Windows game-window lookup failed (treating as not running): {e}", flush=True)
-        return None
+        return []
 
 # Default parchment background color, RGB. Measured directly from a real
 # TLOPO loot popup screenshot on Windows via tools/color_sampler.py (the
@@ -195,10 +227,19 @@ class LootDetector:
         self._ocr_lock = threading.Lock()
         self._ocr_ready = False
 
-        self._window_present_last = False
-        self._cooldown_until = 0.0
-        self._first_absent_at: Optional[float] = None
-        self._last_known_box: Optional[Tuple[int, int, int, int]] = None
+        # Per-window presence/tracking state, keyed by "window key" (the
+        # hwnd on Windows when multiple TLOPO windows may be open at once,
+        # or a constant sentinel on non-Windows where a single full-screen
+        # region is used). Keeping this per-key rather than as single
+        # scalars lets multiple simultaneously-open TLOPO windows (e.g.
+        # multiple characters logged in at once) each be tracked
+        # independently, so a loot popup on one window is never missed
+        # just because another window happened to be focused. See
+        # GitHub issue #2.
+        self._window_present: dict = {}
+        self._cooldown_until: dict = {}
+        self._first_absent_at: dict = {}
+        self._last_known_box: dict = {}
 
         self.active_target_getter: Optional[Callable[[], str]] = None
         self.kill_number_getter: Optional[Callable[[], int]] = None
@@ -306,65 +347,85 @@ class LootDetector:
                         time.sleep(interval)
                         continue
 
-                    region = self._resolve_capture_region(sct)
-                    if region is None:
-                        # Game not running, minimized, or not the focused/
-                        # foreground window (Windows) -- pause detection
-                        # entirely rather than scanning the whole screen,
-                        # which could otherwise pick up unrelated on-screen
-                        # content (e.g. a loot screenshot open in a Discord
-                        # window, or Discord dragged on top of the game) as
-                        # a false positive.
+                    regions = self._resolve_capture_regions(sct)
+                    if not regions:
+                        # Game not running, minimized, or (on Windows) no
+                        # window is currently genuinely visible -- pause
+                        # detection entirely rather than scanning the whole
+                        # screen, which could otherwise pick up unrelated
+                        # on-screen content (e.g. a loot screenshot open in
+                        # a Discord window, or Discord dragged on top of
+                        # the game) as a false positive.
                         self.on_status_change("Waiting for TLOPO...")
                         time.sleep(interval)
                         continue
 
-                    try:
-                        self._scan_once(sct, region)
-                    except Exception:
-                        # Never let a single bad frame kill the whole loop.
-                        traceback.print_exc()
+                    any_detected = False
+                    for window_key, region in regions:
+                        try:
+                            if self._scan_once(sct, window_key, region):
+                                any_detected = True
+                        except Exception:
+                            # Never let a single bad frame kill the whole loop.
+                            traceback.print_exc()
+
+                    if not any_detected:
+                        self.on_status_change("Waiting for TLOPO...")
 
                     time.sleep(interval)
         except Exception as e:
             self.on_error(f"Detection loop crashed: {e}")
 
-    def _resolve_capture_region(self, sct) -> Optional[dict]:
+    def _resolve_capture_regions(self, sct) -> List[Tuple[object, dict]]:
         """
-        Returns the mss capture region to scan this frame, scoped to just
-        the TLOPO game window when possible so other on-screen apps (like
-        Discord) can never be mistaken for the game. Returns None if the
-        game appears to not be running, is minimized, or isn't currently
-        the focused/foreground window (Windows only) -- see the docstring
-        on _find_windows_game_window_rect for why the foreground check
-        matters and what it doesn't cover (e.g. non-focus-stealing
-        overlays).
+        Returns a list of (window_key, mss_region) pairs to scan this
+        frame, one per genuinely visible TLOPO window on Windows (so
+        multiple simultaneously-open windows -- e.g. multiple characters
+        logged in at once -- are all tracked independently; see GitHub
+        issue #2), scoped so other on-screen apps (like Discord) can
+        never be mistaken for the game. window_key uniquely identifies
+        each window (the hwnd on Windows) so per-window presence/tracking
+        state never gets mixed up between two different windows.
+
+        Returns an empty list if the game appears to not be running, is
+        minimized, or (Windows only) no matching window is currently
+        genuinely visible -- see the docstring on
+        _find_windows_game_windows for what the visibility check does
+        and does not cover (e.g. non-focus-stealing overlays).
         """
         if platform.system() == "Windows":
-            rect = _find_windows_game_window_rect(GAME_WINDOW_TITLE_SUBSTRING)
-            if rect is None:
-                return None
-            left, top, width, height = rect
-            return {"left": left, "top": top, "width": width, "height": height}
+            windows = _find_windows_game_windows(GAME_WINDOW_TITLE_SUBSTRING)
+            return [
+                (hwnd, {"left": left, "top": top, "width": width, "height": height})
+                for hwnd, (left, top, width, height) in windows
+            ]
 
         # Non-Windows: window-scoped capture isn't implemented yet, so we
-        # fall back to the full virtual screen. NOTE: this means the
-        # Discord-false-positive issue this fix addresses can still occur
-        # on Mac/Linux until window-scoped capture is added there too.
-        return sct.monitors[0]
+        # fall back to the full virtual screen under a single constant
+        # key. NOTE: this means the Discord-false-positive issue this fix
+        # addresses can still occur on Mac/Linux until window-scoped
+        # capture is added there too.
+        return [("_fullscreen", sct.monitors[0])]
 
     # ------------------------------------------------------------------
     # Per-frame scan
     # ------------------------------------------------------------------
-    def _scan_once(self, sct, monitor):
+    def _scan_once(self, sct, window_key, monitor) -> bool:
+        """
+        Scans a single window's region. Returns True if a loot window is
+        currently being tracked/read for this window_key (used by the
+        caller to decide whether to show the idle "Waiting for TLOPO..."
+        status), False otherwise.
+        """
         now = time.time()
-        if now < self._cooldown_until:
-            return
+        if now < self._cooldown_until.get(window_key, 0.0):
+            return False
 
         shot = sct.grab(monitor)
         frame = np.array(shot)[:, :, :3][:, :, ::-1]  # BGRA -> RGB
 
-        if self._window_present_last and self._last_known_box is not None:
+        last_box = self._last_known_box.get(window_key)
+        if self._window_present.get(window_key) and last_box is not None:
             # We're already tracking an open window -- use the lenient
             # same-spot check instead of re-running the strict fresh-
             # detection search every frame. The strict search is tuned to
@@ -373,38 +434,38 @@ class LootDetector:
             # floating combat text, etc.), which was causing the same
             # chest to be treated as closed-then-reopened and logged twice.
             mask = self._parchment_mask(frame)
-            if self._region_still_present(mask, self._last_known_box):
-                self._first_absent_at = None
-                return
+            if self._region_still_present(mask, last_box):
+                self._first_absent_at[window_key] = None
+                return True
 
             # Coverage dropped in the tracked spot -- might still just be a
             # transient blip, so require sustained absence before treating
             # it as an actual close.
-            if self._first_absent_at is None:
-                self._first_absent_at = now
-            elif now - self._first_absent_at >= ABSENCE_CONFIRM_SECONDS:
-                self._cooldown_until = now + self.settings.post_close_cooldown_s
-                self.on_status_change("Waiting for TLOPO...")
-                self._window_present_last = False
-                self._last_known_box = None
-                self._first_absent_at = None
-            return
+            first_absent = self._first_absent_at.get(window_key)
+            if first_absent is None:
+                self._first_absent_at[window_key] = now
+            elif now - first_absent >= ABSENCE_CONFIRM_SECONDS:
+                self._cooldown_until[window_key] = now + self.settings.post_close_cooldown_s
+                self._window_present[window_key] = False
+                self._last_known_box[window_key] = None
+                self._first_absent_at[window_key] = None
+            return False
 
         # Not currently tracking a window -- run the strict fresh-detection
         # search to see if a brand new popup has appeared.
         region = self._find_loot_window(frame)
         if region is None:
-            return
+            return False
 
-        self._window_present_last = True
-        self._last_known_box = region
-        self._first_absent_at = None
+        self._window_present[window_key] = True
+        self._last_known_box[window_key] = region
+        self._first_absent_at[window_key] = None
         self.on_status_change("Loot window detected — reading...")
 
         result = self._read_loot_window(frame, region)
         if result is not None:
             self.on_chest_detected(result)
-        self.on_status_change("Waiting for TLOPO...")
+        return True
 
     # ------------------------------------------------------------------
     # Window region detection (color-based, resolution independent)

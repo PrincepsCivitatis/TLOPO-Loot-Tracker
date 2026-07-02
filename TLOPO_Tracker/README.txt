@@ -4,6 +4,15 @@ TLOPO LOOT TRACKER - HOW TO USE THIS
 Note: this README file (only this file, not the application itself)
 was written with AI assistance.
 
+*** THIS BRANCH IS EXPERIMENTAL ***
+This branch ("experimental/multi-character") adds support for running
+multiple TLOPO windows at once (e.g. multiple characters logged in
+simultaneously) and detecting loot on each independently, instead of
+only the one window that currently has Windows' focus. This is newer
+and less tested than the main branch - if you just want the stable,
+single-character version, use the main branch / latest numbered
+release instead.
+
 
 This little program sits on your screen while you play The Legend of
 Pirates Online. It watches for the loot popup window that appears when
@@ -14,12 +23,25 @@ for you automatically - kills, gold, item rarity, and especially rare
 It only looks at what's on your screen. It never touches your game
 files and never connects to the internet or any server.
 
-On Windows, it only ever looks inside the actual TLOPO game window
-itself (found by its window title, and only while that window is the
-one you're actively focused on) - not your whole screen. This means
-other things you have open, like Discord, YouTube, or a browser, are
-never scanned, even if you're looking at a screenshot of someone else's
-loot at the same time - as long as TLOPO itself isn't the window on top.
+On Windows, it only ever looks inside actual TLOPO game windows
+themselves (found by their window title) - not your whole screen. This
+means other things you have open, like Discord, YouTube, or a browser,
+are never scanned, even if you're looking at a screenshot of someone
+else's loot at the same time. If you have more than one TLOPO window
+open at once (for example, multiple characters logged in
+simultaneously), this experimental branch watches each of them on its
+own, so a chest opened on one character is detected even if a different
+character's window currently has Windows' focus.
+
+IMPORTANT: because chests are logged against whichever target is
+currently selected in the tracker (see section 3 below), and the
+tracker doesn't yet know which specific character a detected chest
+came from, if you're farming DIFFERENT targets on different characters
+at the same time, all of their loot will still be logged under
+whatever single target is currently selected in the tracker UI. This
+works correctly if all your logged-in characters are farming the SAME
+target together; it does not yet correctly separate loot by character
+if they're farming different things simultaneously.
 
 KNOWN LIMITATION: if something is drawn ON TOP of the game window
 without actually taking focus away from it - for example, Discord's
