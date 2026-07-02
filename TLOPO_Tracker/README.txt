@@ -217,6 +217,17 @@ carry across your whole session, no matter how many targets you farm.
   offer to restore it when it reopens (as long as it's been less than
   8 hours).
 
+KNOWN ISSUE (as of this version): item names that wrap across two
+lines in the loot popup don't always get combined back into one item
+- sometimes you'll see one item logged as two separate half-name
+entries instead of its full name. Less commonly, a green (Rare) item
+can get logged as untagged instead of "Rare" if it happens to sit near
+the edge of the color range the tracker expects. Both are being
+tracked in GitHub Issue #5 and are on the list to fix properly. If you
+run into either, exporting still works fine - the gold amount and
+chest counts are unaffected either way, only the specific item
+name/tag for that one entry may be off.
+
 
 8B. FIXING COLOR DETECTION (ESPECIALLY FOR MAC)
 ---------------------------------------------------

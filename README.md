@@ -33,6 +33,8 @@ Windows 11, Python 3.10+ (the installer will tell you if it's missing and where 
 
 **Known limitation (all platforms, including Windows)**: window-scoping only helps once the game window is *focused*. Something drawn on top of the game *without* stealing focus — most notably Discord's own in-game overlay feature — can still be misread, since the tracker can't currently distinguish "the game is focused" from "something is visually on top of the focused game." Avoid bringing up overlay content with loot screenshots while farming.
 
+**Known issue**: item names that wrap across two lines in the loot popup don't always get merged back into a single item — occasionally you'll see one item logged as two separate half-name entries. Less commonly, a green (Rare) item can be logged as untagged instead of "Rare" near the edge of the expected color range. Gold amounts and chest counts are unaffected either way. Tracked in [Issue #5](../../issues/5).
+
 ## If detection doesn't work on your setup
 
 The tracker finds the loot popup by its background color and reads item rarity by text color, both tuned from a screenshot. If your game renders with different colors (different OS, monitor, or color profile — most likely on Mac, since it's untested there), detection can fail or misclassify rarity. Every one of those colors is adjustable from the in-app **Settings** panel (gear icon) — no code editing required — and a bundled tool (`tools/run_color_sampler.bat` on Windows, `tools/run_color_sampler.sh` on Mac/Linux) reads the exact colors out of a screenshot you take, so you can plug the right numbers in. Full walkthrough: [`TLOPO_Tracker/README.txt`](TLOPO_Tracker/README.txt), section "8B. FIXING COLOR DETECTION."
