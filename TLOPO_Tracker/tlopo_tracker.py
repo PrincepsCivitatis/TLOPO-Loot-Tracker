@@ -551,6 +551,11 @@ class TLOPOTrackerApp:
                     self.loot_text.insert(END, f"★ {item.name} (Legendary) ", "Legendary_row")
                 elif item.rarity == "Famed":
                     self.loot_text.insert(END, f"{item.name} (Famed) ", "Famed_bold")
+                elif item.rarity is None:
+                    # Untagged currency/filler item (Gold, gems, playing
+                    # cards) -- real loot, just not rarity-colored in-game,
+                    # so no parenthetical tag or rarity-specific coloring.
+                    self.loot_text.insert(END, f"{item.name} ", "meta")
                 else:
                     self.loot_text.insert(END, f"{item.name} ({item.rarity}) ", item.rarity)
 

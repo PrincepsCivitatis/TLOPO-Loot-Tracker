@@ -199,6 +199,17 @@ ABSENCE_CONFIRM_SECONDS = 1.2
 # raising this, that's the tradeoff to weigh against accuracy.
 OCR_UPSCALE_FACTOR = 2.0
 
+# Item names get a SECOND, targeted OCR pass on just their own small
+# cropped box, upscaled far more aggressively than the whole-window
+# pass above (safe to do since it's now a tiny image, not the whole
+# popup). This matters specifically for item names because Famed/
+# Legendary items are tracked by exact name match with a running count
+# -- a misspelling ("Miracle Water" read as "Miradle Water") would
+# wrongly count as a different item instead of incrementing the same
+# one, which is a much bigger problem than a misread gold amount or
+# chest title would be.
+NAME_REREAD_UPSCALE_FACTOR = 8.0
+
 
 @dataclass
 class DetectorSettings:
@@ -661,6 +672,15 @@ class LootDetector:
             if "take" in lower and ("small" in lower or "item" in lower):
                 continue  # "Take Small Items" button
 
+            if lower == "items":
+                # The button label sometimes gets split across two OCR
+                # lines ("Take Small" / "Items") instead of being read as
+                # one -- the check above only catches lines containing
+                # "take", so a lone leftover "Items" line would otherwise
+                # slip through as a fake untagged loot item now that
+                # untagged/currency items are kept rather than discarded.
+                continue
+
             digits_only = re.sub(r"[^0-9]", "", stripped)
             if digits_only and re.fullmatch(r"[\d,]+", stripped):
                 numeric_lines.append((int(digits_only), box))
@@ -676,19 +696,45 @@ class LootDetector:
 
         gold = self._extract_gold(gold_label_boxes, numeric_lines)
 
+        name_candidates = self._merge_wrapped_item_lines(name_candidates)
+
         items: List[LootItem] = []
         for text, box in name_candidates:
             name = clean_item_name(text)
             if len(name) < 2:
+                print(f"[TLOPO detect] candidate {text!r} skipped: cleaned name too short", flush=True)
                 continue
             color = self._sample_text_color(win, box)
             if color is None:
+                print(f"[TLOPO detect] candidate {name!r} box={box} skipped: "
+                      f"no text-colored pixels found in box", flush=True)
                 continue
+
+            # A color WAS found (this is real text, not empty background),
+            # but it may not match any rarity tier -- that's expected and
+            # intentional for currency/filler items (Gold, gems, playing
+            # cards) which the game renders in plain white/cream text with
+            # no rarity color. These are still real loot the player
+            # received and should still be tracked, just without a rarity
+            # tag, rather than silently discarded.
             rarity = classify_rarity_from_rgb(color, self.settings.hsv_targets)
-            if rarity is None:
-                # Plain white/cream text (e.g. playing-card filler items)
-                # has no rarity tier and is intentionally not logged.
-                continue
+
+            # Named items (especially Famed/Legendary) are tracked by EXACT
+            # name match with a running count -- if OCR spells the same
+            # item slightly differently between drops (a real, observed
+            # problem: "Miracle Water" read as "Miradle Water"), each
+            # misspelling would wrongly count as a separate item instead
+            # of incrementing the same one. The whole-window OCR pass
+            # upscales everything uniformly, which isn't enough for these
+            # small name labels specifically -- re-reading just this box,
+            # cropped tightly and blown up much further since it's now a
+            # tiny image, gets meaningfully better character accuracy.
+            reread = self._reread_item_name(win, box)
+            print(f"[TLOPO detect] targeted re-OCR for {name!r}: reread={reread!r}", flush=True)
+            if reread and len(reread) >= len(name) - 2:
+                name = reread
+
+            print(f"[TLOPO detect] candidate {name!r} sampled color={color} -> rarity={rarity}", flush=True)
             items.append(LootItem(name=name, rarity=rarity))
 
         target = self.active_target_getter() if self.active_target_getter else ""
@@ -710,6 +756,49 @@ class LootDetector:
     def _box_center(box: tuple) -> Tuple[float, float]:
         x1, y1, x2, y2 = box
         return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+    @staticmethod
+    def _merge_wrapped_item_lines(candidates: List[Tuple[str, tuple]]) -> List[Tuple[str, tuple]]:
+        """
+        Item names that wrap onto a second line (e.g. "Light Green" /
+        "Seamed Tank" for one item called "Light Green Seamed Tank") are
+        read by OCR as two separate lines, which previously got logged
+        as two separate items each with half the real name.
+
+        Detects vertically-stacked candidate lines that are almost
+        certainly the same wrapped label -- a very small vertical gap
+        AND nearly identical left edges -- and merges them into one
+        combined name/box. This is intentionally conservative: two
+        different items stacked in the same grid column (not a line
+        wrap) also share a similar left edge, but have noticeably more
+        vertical spacing between them than two halves of one wrapped
+        line do, so only a tight gap triggers a merge.
+        """
+        if len(candidates) < 2:
+            return candidates
+
+        ordered = sorted(candidates, key=lambda c: (c[1][1], c[1][0]))
+        merged: List[Tuple[str, tuple]] = []
+        current_text, current_box = ordered[0]
+
+        for text, box in ordered[1:]:
+            cx1, cy1, cx2, cy2 = current_box
+            nx1, ny1, nx2, ny2 = box
+            vertical_gap = ny1 - cy2
+            left_edge_diff = abs(nx1 - cx1)
+
+            if -2 <= vertical_gap <= 8 and left_edge_diff <= 15:
+                print(f"[TLOPO detect] merging wrapped item name lines "
+                      f"{current_text!r} + {text!r} (gap={vertical_gap}, "
+                      f"left_edge_diff={left_edge_diff})", flush=True)
+                current_text = f"{current_text} {text}"
+                current_box = (min(cx1, nx1), min(cy1, ny1), max(cx2, nx2), max(cy2, ny2))
+            else:
+                merged.append((current_text, current_box))
+                current_text, current_box = text, box
+
+        merged.append((current_text, current_box))
+        return merged
 
     def _extract_gold(
         self,
@@ -767,9 +856,67 @@ class LootDetector:
                 continue
             xs = [p[0] / OCR_UPSCALE_FACTOR for p in bbox]
             ys = [p[1] / OCR_UPSCALE_FACTOR for p in bbox]
-            box = (int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)))
+            # Rounding (rather than truncating) and padding by a pixel on
+            # each side compensates for the upscale/downscale round-trip
+            # shrinking the box slightly. That shrinkage barely matters for
+            # large text (title, gold amount) but can crop a small item-
+            # name box down to too few pixels for color sampling to find
+            # any text at all, silently dropping the item entirely.
+            pad = 1
+            box = (
+                max(0, round(min(xs)) - pad),
+                max(0, round(min(ys)) - pad),
+                min(w, round(max(xs)) + pad),
+                min(h, round(max(ys)) + pad),
+            )
             out.append((text, box))
         return out
+
+    def _reread_item_name(self, win: np.ndarray, box: tuple) -> Optional[str]:
+        """
+        Re-runs OCR on just this item's name box (cropped tightly with a
+        small margin, upscaled far more aggressively than the whole-
+        window pass since it's now a small image), to get a cleaner read
+        of the name specifically. See NAME_REREAD_UPSCALE_FACTOR for why
+        this matters more for item names than for other text. Returns
+        the cleaned combined text if anything was read, else None --
+        callers should keep the original whole-window OCR text as a
+        fallback when this returns None.
+        """
+        if self._ocr_reader is None:
+            return None
+        x1, y1, x2, y2 = box
+        h, w = win.shape[0], win.shape[1]
+        pad = 4
+        x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
+        x2, y2 = min(w, x2 + pad), min(h, y2 + pad)
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        sub = win[y1:y2, x1:x2]
+        if sub.size == 0:
+            return None
+
+        try:
+            from PIL import Image
+            sh, sw = sub.shape[0], sub.shape[1]
+            upscaled = Image.fromarray(sub).resize(
+                (max(1, int(sw * NAME_REREAD_UPSCALE_FACTOR)), max(1, int(sh * NAME_REREAD_UPSCALE_FACTOR))),
+                Image.LANCZOS,
+            )
+            # mag_ratio adds further internal magnification on top of the
+            # physical upscale above -- cheap here since this is already
+            # a small, single-item crop rather than the whole window.
+            results = self._ocr_reader.readtext(np.array(upscaled), mag_ratio=1.5)
+        except Exception:
+            return None
+
+        fragments = [(bbox[0][0], text) for bbox, text, conf in results if conf >= 0.35]
+        if not fragments:
+            return None
+        fragments.sort(key=lambda f: f[0])
+        combined = " ".join(clean_item_name(t) for _, t in fragments if clean_item_name(t))
+        return combined.strip() or None
 
     def _sample_text_color(self, crop: np.ndarray, box: tuple) -> Optional[Tuple[int, int, int]]:
         """
