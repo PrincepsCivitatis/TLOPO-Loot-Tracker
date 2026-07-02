@@ -15,8 +15,8 @@ It only looks at what's on your screen. It never touches your game
 files and never connects to the internet or any server.
 
 
-1. FIRST TIME SETUP
---------------------
+1. FIRST TIME SETUP (WINDOWS)
+------------------------------
 Double-click "install.bat" and wait for it to finish. This downloads
 everything the tracker needs to run. It only takes a few minutes and
 you only need to do this once. If a black window pops up with text
@@ -27,8 +27,8 @@ If it tells you Python is missing, follow the instructions it gives
 you to install Python, then run install.bat again.
 
 
-2. EVERY TIME YOU WANT TO PLAY
--------------------------------
+2. EVERY TIME YOU WANT TO PLAY (WINDOWS)
+------------------------------------------
 Double-click "START_TRACKER.bat". A small window will open in the
 top-right corner of your screen. Leave it open while you play - it
 will keep watching for loot windows in the background.
@@ -36,6 +36,54 @@ will keep watching for loot windows in the background.
 The very first time you start it, it needs to download a small file
 for reading text (about 100MB). You'll see a message about this - just
 wait for it to finish, it only happens once.
+
+
+2B. MAC USERS - THIS IS NOT YET TESTED ON A REAL MAC
+-------------------------------------------------------
+This tracker was built and tested on Windows 11. A version for Mac
+("install.sh" and "start_tracker.sh") is included and SHOULD work in
+theory, since the underlying tools it's built on all support Mac, but
+nobody has actually confirmed it runs correctly on a real Mac yet. If
+you try it and run into problems, that's expected until it's been
+properly tested - please report what happened.
+
+To try it on a Mac:
+
+  a) Open the Terminal app, then navigate to the folder where you
+     unzipped the tracker (drag the folder onto the Terminal window
+     after typing "cd " to fill in the path automatically, then press
+     Enter).
+
+  b) Run the setup script once by typing:
+         bash install.sh
+     and pressing Enter. Follow along with any messages it prints.
+
+  c) Every time you want to play, run:
+         bash start_tracker.sh
+
+  d) IMPORTANT - Screen Recording permission: this tracker works by
+     taking screenshots of your screen, and Macs block that by default
+     for privacy. The FIRST time you run it, macOS will likely either
+     ask you to grant permission, or the tracker will just fail to see
+     anything without any obvious error. To turn this on yourself:
+         Open System Settings -> Privacy & Security -> Screen Recording
+         -> turn ON the switch next to "Terminal" (or whichever app
+         you used to launch the tracker).
+     After changing this setting, you may need to fully quit and
+     reopen Terminal (and the tracker) for it to take effect.
+
+  e) If macOS shows a warning about running a downloaded script, you
+     may need to allow it under System Settings -> Privacy & Security
+     (look for a message near the bottom mentioning the blocked file,
+     with an "Allow Anyway" button).
+
+  f) If you don't already have Python 3.10 or newer, install.sh will
+     tell you so. You can install it from https://www.python.org/downloads/
+     or, if you use Homebrew, by running: brew install python@3.12
+
+Everything else in this guide (setting a target, exporting, etc.)
+works the same way on Mac as it does on Windows - only the setup/launch
+steps are different.
 
 
 3. BEFORE YOU START FARMING

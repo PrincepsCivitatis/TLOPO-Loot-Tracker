@@ -24,3 +24,7 @@ Please open an [Issue](../../issues) — bug reports and feature requests are we
 ## Requirements
 
 Windows 11, Python 3.10+ (the installer will tell you if it's missing and where to get it).
+
+**macOS**: an experimental `install.sh` / `start_tracker.sh` is included and should work in theory (everything the app is built on — `mss`, `tkinter`, `easyocr`/`torch` — supports macOS), but **this has not actually been tested on a real Mac yet**. You will very likely need to grant your Terminal app **Screen Recording** permission in System Settings → Privacy & Security before the tracker can see anything on screen. Full details are in [`TLOPO_Tracker/README.txt`](TLOPO_Tracker/README.txt) under "MAC USERS." If you try it, please [open an issue](../../issues) with what you found.
+
+**Linux**: not tested and not currently documented — screen capture is unreliable under Wayland depending on your desktop environment, so results may vary even though the same shell scripts would likely work under X11.
