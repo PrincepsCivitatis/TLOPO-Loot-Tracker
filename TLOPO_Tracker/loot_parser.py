@@ -25,7 +25,13 @@ RARITY_ORDER = ["Common", "Uncommon", "Rare", "Famed", "Legendary"]
 DEFAULT_HSV_TARGETS = {
     "Common":    {"h": 28,  "s": 76, "v": 91, "tolerance": 18},   # Orange  #E87820
     "Uncommon":  {"h": 53,  "s": 78, "v": 91, "tolerance": 18},   # Yellow  #E8D020
-    "Rare":      {"h": 120, "s": 84, "v": 78, "tolerance": 22},   # Green   #20C820
+    # Green/Rare: shifted from the spec's rough estimate (h=120, tolerance=22)
+    # after a real sampled Rare item ("Venomed Cutlass", RGB 42,60,26 ->
+    # hue ~92) fell just outside that window and got wrongly treated as
+    # untagged. Re-centered lower with a wider tolerance to cover it,
+    # while keeping enough of a gap from Uncommon's range (35-71) to
+    # avoid the two tiers colliding.
+    "Rare":      {"h": 108, "s": 84, "v": 78, "tolerance": 26},   # Green   #20C820
     "Famed":     {"h": 226, "s": 77, "v": 91, "tolerance": 22},   # Blue    #2050E8
     "Legendary": {"h": 0,   "s": 85, "v": 91, "tolerance": 18},   # Red     #E82020
 }
@@ -145,7 +151,10 @@ def parse_gold_amount(raw_text: str) -> int:
 @dataclass
 class LootItem:
     name: str
-    rarity: str  # one of RARITY_ORDER
+    rarity: Optional[str]  # one of RARITY_ORDER, or None for untagged
+    # currency/filler items (Gold, gems, playing cards) that the game
+    # renders with no rarity color but which are still real loot worth
+    # tracking.
 
     def is_named_tier(self) -> bool:
         return self.rarity in ("Famed", "Legendary")

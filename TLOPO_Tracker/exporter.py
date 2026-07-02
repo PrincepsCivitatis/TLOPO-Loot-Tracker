@@ -239,7 +239,10 @@ def export_to_text(session: Session, folder: Optional[str] = None) -> str:
             lines.append("Full Loot Log:")
             for entry in stats.loot_log:
                 items = entry.get("items", [])
-                item_strs = [f"{it['name']} ({it['rarity']})" for it in items] or ["(no items read)"]
+                item_strs = [
+                    f"{it['name']} ({it['rarity']})" if it.get("rarity") else it['name']
+                    for it in items
+                ] or ["(no items read)"]
                 lines.append(
                     f"  [{entry.get('timestamp','')}] [{entry.get('target', name)}] "
                     f"[{entry.get('chest_type','')}] — {' '.join(item_strs)} — {entry.get('gold',0)}g"

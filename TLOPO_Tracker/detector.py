@@ -611,6 +611,15 @@ class LootDetector:
             if "take" in lower and ("small" in lower or "item" in lower):
                 continue  # "Take Small Items" button
 
+            if lower == "items":
+                # The button label sometimes gets split across two OCR
+                # lines ("Take Small" / "Items") instead of being read as
+                # one -- the check above only catches lines containing
+                # "take", so a lone leftover "Items" line would otherwise
+                # slip through as a fake untagged loot item now that
+                # untagged/currency items are kept rather than discarded.
+                continue
+
             digits_only = re.sub(r"[^0-9]", "", stripped)
             if digits_only and re.fullmatch(r"[\d,]+", stripped):
                 numeric_lines.append((int(digits_only), box))
@@ -640,13 +649,14 @@ class LootDetector:
                       f"no text-colored pixels found in box", flush=True)
                 continue
 
+            # A color WAS found (this is real text, not empty background),
+            # but it may not match any rarity tier -- that's expected and
+            # intentional for currency/filler items (Gold, gems, playing
+            # cards) which the game renders in plain white/cream text with
+            # no rarity color. These are still real loot the player
+            # received and should still be tracked, just without a rarity
+            # tag, rather than silently discarded.
             rarity = classify_rarity_from_rgb(color, self.settings.hsv_targets)
-            if rarity is None:
-                # Plain white/cream text (e.g. playing-card filler items)
-                # has no rarity tier and is intentionally not logged.
-                print(f"[TLOPO detect] candidate {name!r} sampled color={color} "
-                      f"skipped: no rarity hue matched", flush=True)
-                continue
 
             # Named items (especially Famed/Legendary) are tracked by EXACT
             # name match with a running count -- if OCR spells the same
