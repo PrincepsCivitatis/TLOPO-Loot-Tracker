@@ -299,7 +299,13 @@ class LootDetector:
         try:
             with mss.mss() as sct:
                 while not self._stop_event.is_set():
-                    interval = max(0.1, self.settings.poll_interval_ms / 1000.0)
+                    # Floor matches MIN_POLL_INTERVAL_MS in tlopo_tracker.py
+                    # (lowered from an earlier 100ms floor per GitHub issue
+                    # #3 -- fast-looting playstyles can open/close loot
+                    # containers faster than that allowed detection to
+                    # catch). Very low values increase CPU usage since each
+                    # cycle does real screenshot + image-matching work.
+                    interval = max(0.01, self.settings.poll_interval_ms / 1000.0)
 
                     if self._pause_event.is_set():
                         self.on_status_change("Waiting for TLOPO...")

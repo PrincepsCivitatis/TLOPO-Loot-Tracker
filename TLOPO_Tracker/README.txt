@@ -180,6 +180,15 @@ carry across your whole session, no matter how many targets you farm.
 - If item names are misspelled or garbled: open Settings and increase
   the "Detection polling interval" slightly - this gives the reading
   engine a bit more time and can improve accuracy.
+- If you're farming in a way that opens loot containers very quickly
+  (for example, killing a big group at once so several chests drop
+  together, or fast styles like bilge farming), and some containers
+  seem to get missed: open Settings and lower the "Detection polling
+  interval" number - type in a smaller number (as low as 10ms). This
+  makes the tracker check your screen more often so it's less likely
+  to miss a container that opens and closes quickly. Setting it very
+  low does make your computer work harder (more screenshots per
+  second), so only lower it as much as you actually need.
 - If the tracker window ever crashes, just double-click
   START_TRACKER.bat again (or re-run start_tracker.sh on Mac). Your
   session is automatically saved every minute, and the tracker will
