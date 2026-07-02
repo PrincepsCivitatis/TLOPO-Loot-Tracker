@@ -8,6 +8,7 @@ Tk GUI stays responsive. Never touches game files or the network -- it
 only reads pixels off the screen.
 """
 
+import platform
 import re
 import threading
 import time
@@ -24,6 +25,111 @@ from loot_parser import (
     clean_item_name,
     normalize_chest_type,
 )
+
+# Title substring (case-insensitive) used to find the actual TLOPO game
+# window on Windows, so capture can be restricted to just that window
+# instead of the whole screen. Without this, anything else visible on
+# screen with a similarly-colored parchment image -- e.g. someone
+# scrolling a loot screenshot in a Discord channel -- can be picked up
+# as a false positive and contaminate the session with someone else's
+# loot. See GitHub issue #1.
+GAME_WINDOW_TITLE_SUBSTRING = "legend of pirates online"
+
+
+def _find_windows_game_window_rect(title_substring: str) -> Optional[Tuple[int, int, int, int]]:
+    """
+    Windows-only: locate a visible top-level window whose title contains
+    title_substring (case-insensitive) and return its screen rectangle as
+    (left, top, width, height). Returns None if not on Windows, the
+    window isn't found, it's minimized (so callers correctly treat
+    "minimized" the same as "not running" and pause detection, per spec),
+    or it isn't the currently focused/foreground window.
+
+    The foreground check matters because screen capture grabs whatever
+    pixels are on screen at a given rectangle -- knowing the game window's
+    *position* doesn't mean the game is what's actually visible there. If
+    another window (e.g. Discord) is dragged on top of the game, that
+    still counts as "inside the game's rectangle" positionally, but the
+    captured pixels would be Discord's, not the game's, and could be
+    misread as a loot popup. Requiring the game to be the foreground
+    window catches the common case of someone dragging another app over
+    it (which normally also focuses that other app). It does NOT catch
+    an overlay that renders on top without stealing focus (e.g. Discord's
+    own in-game overlay feature) -- reliably capturing a specific window's
+    contents regardless of what's drawn on top of it would require
+    per-window rendering capture (e.g. PrintWindow with
+    PW_RENDERFULLCONTENT), which often doesn't work correctly for
+    hardware-accelerated 3D game windows like this one and is out of
+    scope here. This is a documented known limitation.
+    """
+    if platform.system() != "Windows":
+        return None
+    try:
+        import ctypes
+        import ctypes.wintypes as wintypes
+
+        user32 = ctypes.windll.user32
+
+        # Declare explicit argument/return types for every function used
+        # here. HWND is pointer-sized -- on 64-bit Windows, letting ctypes
+        # guess the type of a plain Python int passed as an argument is a
+        # classic source of handle-truncation bugs. Being explicit costs
+        # nothing and removes that whole class of risk.
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        user32.EnumWindows.argtypes = [EnumWindowsProc, wintypes.LPARAM]
+        user32.EnumWindows.restype = wintypes.BOOL
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowTextW.restype = ctypes.c_int
+        user32.IsIconic.argtypes = [wintypes.HWND]
+        user32.IsIconic.restype = wintypes.BOOL
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.GetWindowRect.restype = wintypes.BOOL
+        user32.GetForegroundWindow.argtypes = []
+        user32.GetForegroundWindow.restype = wintypes.HWND
+
+        found_hwnd = []
+
+        def _enum_callback(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length == 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            if title_substring.lower() in buf.value.lower():
+                found_hwnd.append(hwnd)
+                return False  # stop enumerating, we found it
+            return True
+
+        user32.EnumWindows(EnumWindowsProc(_enum_callback), 0)
+
+        if not found_hwnd:
+            return None
+        hwnd = found_hwnd[0]
+
+        if user32.IsIconic(hwnd):
+            return None  # minimized -- treat as "not running"
+
+        if user32.GetForegroundWindow() != hwnd:
+            return None  # something else is focused/on top -- don't trust this capture
+
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+
+        left, top, right, bottom = rect.left, rect.top, rect.right, rect.bottom
+        width, height = right - left, bottom - top
+        if width <= 0 or height <= 0:
+            return None
+        return (left, top, width, height)
+    except Exception as e:
+        print(f"[TLOPO detect] Windows game-window lookup failed (treating as not running): {e}", flush=True)
+        return None
 
 # Default parchment background color, RGB. Measured directly from a real
 # TLOPO loot popup screenshot on Windows via tools/color_sampler.py (the
@@ -192,7 +298,6 @@ class LootDetector:
 
         try:
             with mss.mss() as sct:
-                monitor = sct.monitors[0]  # full virtual screen (all monitors)
                 while not self._stop_event.is_set():
                     interval = max(0.1, self.settings.poll_interval_ms / 1000.0)
 
@@ -201,8 +306,21 @@ class LootDetector:
                         time.sleep(interval)
                         continue
 
+                    region = self._resolve_capture_region(sct)
+                    if region is None:
+                        # Game not running, minimized, or not the focused/
+                        # foreground window (Windows) -- pause detection
+                        # entirely rather than scanning the whole screen,
+                        # which could otherwise pick up unrelated on-screen
+                        # content (e.g. a loot screenshot open in a Discord
+                        # window, or Discord dragged on top of the game) as
+                        # a false positive.
+                        self.on_status_change("Waiting for TLOPO...")
+                        time.sleep(interval)
+                        continue
+
                     try:
-                        self._scan_once(sct, monitor)
+                        self._scan_once(sct, region)
                     except Exception:
                         # Never let a single bad frame kill the whole loop.
                         traceback.print_exc()
@@ -210,6 +328,30 @@ class LootDetector:
                     time.sleep(interval)
         except Exception as e:
             self.on_error(f"Detection loop crashed: {e}")
+
+    def _resolve_capture_region(self, sct) -> Optional[dict]:
+        """
+        Returns the mss capture region to scan this frame, scoped to just
+        the TLOPO game window when possible so other on-screen apps (like
+        Discord) can never be mistaken for the game. Returns None if the
+        game appears to not be running, is minimized, or isn't currently
+        the focused/foreground window (Windows only) -- see the docstring
+        on _find_windows_game_window_rect for why the foreground check
+        matters and what it doesn't cover (e.g. non-focus-stealing
+        overlays).
+        """
+        if platform.system() == "Windows":
+            rect = _find_windows_game_window_rect(GAME_WINDOW_TITLE_SUBSTRING)
+            if rect is None:
+                return None
+            left, top, width, height = rect
+            return {"left": left, "top": top, "width": width, "height": height}
+
+        # Non-Windows: window-scoped capture isn't implemented yet, so we
+        # fall back to the full virtual screen. NOTE: this means the
+        # Discord-false-positive issue this fix addresses can still occur
+        # on Mac/Linux until window-scoped capture is added there too.
+        return sct.monitors[0]
 
     # ------------------------------------------------------------------
     # Per-frame scan

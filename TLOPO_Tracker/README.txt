@@ -14,6 +14,26 @@ for you automatically - kills, gold, item rarity, and especially rare
 It only looks at what's on your screen. It never touches your game
 files and never connects to the internet or any server.
 
+On Windows, it only ever looks inside the actual TLOPO game window
+itself (found by its window title, and only while that window is the
+one you're actively focused on) - not your whole screen. This means
+other things you have open, like Discord, YouTube, or a browser, are
+never scanned, even if you're looking at a screenshot of someone else's
+loot at the same time - as long as TLOPO itself isn't the window on top.
+
+KNOWN LIMITATION: if something is drawn ON TOP of the game window
+without actually taking focus away from it - for example, Discord's
+built-in "in-game overlay" feature (not the full Discord app, just the
+small overlay you can bring up while a game stays focused) - the
+tracker cannot currently tell the difference and could still misread
+whatever is visibly on top. Properly seeing through overlays like that
+would require a much more advanced capture method that isn't reliable
+for 3D game windows like this one, so for now: avoid using overlay
+features that draw loot screenshots on top of the game while farming,
+if you want to be sure nothing gets misread. (This window-scoping is
+not yet implemented for the experimental Mac version at all - see "8B"
+below.)
+
 
 1. FIRST TIME SETUP (WINDOWS)
 ------------------------------
@@ -80,6 +100,18 @@ To try it on a Mac:
   f) If you don't already have Python 3.10 or newer, install.sh will
      tell you so. You can install it from https://www.python.org/downloads/
      or, if you use Homebrew, by running: brew install python@3.12
+
+  g) IMPORTANT - Mac currently scans your WHOLE screen, not just the
+     game: on Windows, the tracker only looks inside the actual game
+     window itself, so nothing else you have open (Discord, a browser,
+     etc.) can ever be mistaken for the game. That window-finding trick
+     hasn't been built for Mac yet, so on Mac the tracker currently
+     watches everything on your screen. In practice this means: if you
+     have a loot screenshot or similar tan/parchment-colored image open
+     in another app (like scrolling through a Discord channel) while
+     the tracker is running, it could misread that instead of your
+     actual game. Until this is fixed for Mac, it's safest to keep
+     other windows with loot screenshots closed while farming.
 
 Everything else in this guide (setting a target, exporting, etc.)
 works the same way on Mac as it does on Windows - only the setup/launch
