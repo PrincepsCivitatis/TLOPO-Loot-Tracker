@@ -202,6 +202,21 @@ ABSENCE_CONFIRM_SECONDS = 0.6
 # not just a cheap pixel-coverage check.
 CONTENT_RECHECK_INTERVAL_S = 0.75
 
+# Minimum cleaned item-name length to count as "real" evidence when
+# comparing item counts for chest-growth detection (see
+# _check_for_new_chest_content / _countable_item_total). Short, unstable
+# OCR fragments from some unidentified bit of the screen near the loot
+# popup (observed in practice: read as 'arg L' on one frame and as two
+# separate fragments, 'LvJu' + 'TV', on the very next re-read of the same
+# still-open chest) can otherwise look like new items appearing between
+# rechecks. Real TLOPO item names are always multi-word and comfortably
+# longer than this, so raising the bar here trades a slightly slower
+# (falls back to the normal absence-confirm + cooldown path instead)
+# detection of a new chest whose first distinguishing item happens to be
+# unusually short, for much lower risk of a false "new chest" trigger
+# from noise.
+GROWTH_ITEM_MIN_NAME_LEN = 5
+
 # EasyOCR (like most OCR engines) reads small text much less reliably
 # than larger text -- game UI text captured at native resolution is
 # often small enough that individual letters get confused with similar-
@@ -305,6 +320,10 @@ class LootDetector:
         self._seen_item_count: dict = {}
         self._seen_gold: dict = {}
         self._last_content_check_at: dict = {}
+        # True if the PREVIOUS recheck for this window saw growth over the
+        # baseline that hasn't been confirmed by a second consecutive
+        # recheck yet -- see _check_for_new_chest_content.
+        self._pending_growth: dict = {}
 
         self.active_target_getter: Optional[Callable[[], str]] = None
         self.kill_number_getter: Optional[Callable[[], int]] = None
@@ -525,6 +544,7 @@ class LootDetector:
                 self._first_absent_at[window_key] = None
                 self._seen_item_count[window_key] = 0
                 self._seen_gold[window_key] = 0
+                self._pending_growth[window_key] = False
             return False
 
         # Not currently tracking a window -- run the strict fresh-detection
@@ -537,17 +557,24 @@ class LootDetector:
         self._last_known_box[window_key] = region
         self._first_absent_at[window_key] = None
         self._last_content_check_at[window_key] = now
+        self._pending_growth[window_key] = False
         self.on_status_change("Loot window detected — reading...")
 
         result = self._read_loot_window(frame, region)
         if result is not None:
-            self._seen_item_count[window_key] = len(result.items)
+            self._seen_item_count[window_key] = self._countable_item_total(result.items)
             self._seen_gold[window_key] = result.gold
             self.on_chest_detected(result)
         else:
             self._seen_item_count[window_key] = 0
             self._seen_gold[window_key] = 0
         return True
+
+    @staticmethod
+    def _countable_item_total(items: List[LootItem]) -> int:
+        """See GROWTH_ITEM_MIN_NAME_LEN -- excludes short, noise-prone
+        candidate names from the count used for chest-growth comparisons."""
+        return sum(1 for i in items if len(i.name) >= GROWTH_ITEM_MIN_NAME_LEN)
 
     def _check_for_new_chest_content(self, frame: np.ndarray, box, window_key) -> None:
         """
@@ -560,42 +587,73 @@ class LootDetector:
         item count and gold shrink from here -- so that's left alone,
         never re-logged.
 
-        If instead the item count or gold reads HIGHER than anything seen
-        so far, that can only mean a fresh, different chest opened in this
-        same screen spot before the old one was confirmed closed (taking
-        items never adds more to the screen) -- most likely because the
-        whole open-close-reopen happened faster than
+        If instead the item count or a LABELED gold reading is HIGHER than
+        anything seen so far, that can only mean a fresh, different chest
+        opened in this same screen spot before the old one was confirmed
+        closed (taking items never adds more to the screen) -- most likely
+        because the whole open-close-reopen happened faster than
         ABSENCE_CONFIRM_SECONDS could register the popup as ever having
-        gone away. In that case the entire current read is logged as a new
-        ChestResult. This is deliberately NOT restricted to just the
-        "new" items by name -- two different chests can easily drop an
-        item with the same name (including two different Famed/Legendary
-        drops in a row), and by the time a new chest's popup is showing,
-        the previous one's popup (and its now-claimed-or-abandoned items)
-        is already gone, so the full current read IS the new chest's
-        contents.
+        gone away. Gold is read with require_labeled_gold=True here
+        specifically: once gold is actually collected, its "Gold" label
+        disappears from the popup, and without this, the fallback
+        "first number found" logic in _extract_gold can grab something
+        unrelated (e.g. the Loot Rating score) and misread it as a new,
+        larger gold amount.
+
+        This growth check alone isn't fully trustworthy on its own, though
+        -- stray, non-deterministic OCR misreads of some unrelated bit of
+        the popup (a texture, an icon edge) can occasionally get read as a
+        short garbage "item" on one frame and not the next, which would
+        otherwise look like transient growth. So a growth reading is only
+        acted on once it's seen on two CONSECUTIVE recheck passes in a
+        row (see _pending_growth) -- a real new chest's contents persist
+        frame to frame, while one-off OCR noise generally doesn't repeat
+        identically. When confirmed, the entire current read is logged as
+        a new ChestResult -- deliberately NOT restricted to just the
+        "new" items by name, since two different chests can easily drop
+        an item with the same name (including two different Famed/
+        Legendary drops in a row), and by the time a new chest's popup is
+        showing, the previous one's popup is already gone, so the full
+        current read IS the new chest's contents.
         """
-        reread = self._read_loot_window(frame, box)
+        reread = self._read_loot_window(frame, box, require_labeled_gold=True)
         if reread is None:
+            self._pending_growth[window_key] = False
             return
 
         seen_count = self._seen_item_count.get(window_key, 0)
         seen_gold = self._seen_gold.get(window_key, 0)
-        current_count = len(reread.items)
+        current_count = self._countable_item_total(reread.items)
+        grew = current_count > seen_count or reread.gold > seen_gold
 
-        if current_count > seen_count or reread.gold > seen_gold:
-            print(f"[TLOPO detect] new chest content detected at same spot: "
-                  f"items={[i.name for i in reread.items]} gold={reread.gold} "
-                  f"(previous seen_count={seen_count} seen_gold={seen_gold})", flush=True)
-            self.on_chest_detected(reread)
-            self._seen_item_count[window_key] = current_count
-            self._seen_gold[window_key] = reread.gold
-        # else: current read is a subset of (or equal to) what's already been
-        # logged -- items being taken, or a one-frame OCR undercount. Baseline
-        # is intentionally NEVER lowered here: if it tracked the current
-        # (possibly transient) low count instead of the running max, a later
-        # frame simply reading the same still-open chest correctly again
-        # would look like "growth" and get wrongly logged a second time.
+        if not grew:
+            # Back within (or still at) the known baseline -- items being
+            # taken, or a one-frame OCR undercount/misread that didn't
+            # repeat. Baseline is intentionally NEVER lowered here: if it
+            # tracked the current (possibly transient) low count instead
+            # of the running max, a later frame simply reading the same
+            # still-open chest correctly again would look like "growth"
+            # and get wrongly logged a second time.
+            self._pending_growth[window_key] = False
+            return
+
+        if not self._pending_growth.get(window_key):
+            # First frame to show growth -- could be a real new chest, or
+            # a one-off OCR misread. Wait for the next recheck to confirm
+            # before logging anything.
+            print(f"[TLOPO detect] possible new chest content at same spot "
+                  f"(awaiting confirmation): items={[i.name for i in reread.items]} "
+                  f"gold={reread.gold} (previous seen_count={seen_count} seen_gold={seen_gold})", flush=True)
+            self._pending_growth[window_key] = True
+            return
+
+        print(f"[TLOPO detect] new chest content confirmed at same spot: "
+              f"items={[i.name for i in reread.items]} gold={reread.gold} "
+              f"(previous seen_count={seen_count} seen_gold={seen_gold})", flush=True)
+        self.on_chest_detected(reread)
+        self._seen_item_count[window_key] = current_count
+        self._seen_gold[window_key] = reread.gold
+        self._pending_growth[window_key] = False
 
     # ------------------------------------------------------------------
     # Window region detection (color-based, resolution independent)
@@ -720,7 +778,7 @@ class LootDetector:
     # ------------------------------------------------------------------
     # OCR + rarity classification of a detected window
     # ------------------------------------------------------------------
-    def _read_loot_window(self, frame: np.ndarray, region) -> Optional[ChestResult]:
+    def _read_loot_window(self, frame: np.ndarray, region, require_labeled_gold: bool = False) -> Optional[ChestResult]:
         """
         The real popup layout (confirmed from an actual screenshot) is:
           - A dark banner across the top with the chest-type title
@@ -752,6 +810,7 @@ class LootDetector:
 
         chest_type = None
         gold_label_boxes: List[tuple] = []
+        rating_box: Optional[tuple] = None
         numeric_lines: List[Tuple[int, tuple]] = []
         name_candidates: List[Tuple[str, tuple]] = []
 
@@ -770,18 +829,27 @@ class LootDetector:
                 continue
 
             if "rating" in lower:
+                rating_box = box
                 continue  # "Loot Rating:" label
 
-            if "take" in lower and ("small" in lower or "item" in lower):
-                continue  # "Take Small Items" button
+            # The button reads "Take Small Items" first, then changes to
+            # "Take It All" once the small items/gold have already been
+            # collected and only larger items (weapons/clothes) remain --
+            # matching only "small"/"item" missed that second state, and
+            # OCR noise can append stray characters (e.g. "Take It AllI"),
+            # so match loosely on "all" too rather than requiring an exact
+            # phrase.
+            if "take" in lower and ("small" in lower or "item" in lower or "all" in lower):
+                continue
 
-            if lower == "items":
+            if lower in ("items", "all"):
                 # The button label sometimes gets split across two OCR
-                # lines ("Take Small" / "Items") instead of being read as
-                # one -- the check above only catches lines containing
-                # "take", so a lone leftover "Items" line would otherwise
-                # slip through as a fake untagged loot item now that
-                # untagged/currency items are kept rather than discarded.
+                # lines ("Take Small" / "Items", or "Take It" / "All")
+                # instead of being read as one -- the check above only
+                # catches lines containing "take", so a lone leftover
+                # "Items"/"All" line would otherwise slip through as a
+                # fake untagged loot item now that untagged/currency items
+                # are kept rather than discarded.
                 continue
 
             digits_only = re.sub(r"[^0-9]", "", stripped)
@@ -797,7 +865,24 @@ class LootDetector:
             print("[TLOPO detect] no chest-type title matched in OCR text -- discarding frame", flush=True)
             return None
 
-        gold = self._extract_gold(gold_label_boxes, numeric_lines)
+        if rating_box is not None and numeric_lines:
+            # The "Loot Rating:" score sits on the same row as its label,
+            # just to the right of it -- exclude any number sharing that
+            # row so it's never mistaken for the gold amount (this
+            # happened for real: once gold/small items were already taken
+            # and no "Gold" label was left on screen to anchor against,
+            # the fallback-to-first-number logic in _extract_gold grabbed
+            # the Loot Rating score instead, e.g. reading "110 gold" that
+            # was actually the loot rating).
+            ry1, ry2 = rating_box[1], rating_box[3]
+            r_center_y = (ry1 + ry2) / 2.0
+            row_tolerance = max(5, ry2 - ry1)
+            numeric_lines = [
+                (val, box) for val, box in numeric_lines
+                if abs((box[1] + box[3]) / 2.0 - r_center_y) > row_tolerance
+            ]
+
+        gold = self._extract_gold(gold_label_boxes, numeric_lines, require_label=require_labeled_gold)
 
         name_candidates = self._merge_wrapped_item_lines(name_candidates)
 
@@ -907,12 +992,24 @@ class LootDetector:
         self,
         gold_label_boxes: List[tuple],
         numeric_lines: List[Tuple[int, tuple]],
+        require_label: bool = False,
     ) -> int:
         """
         The gold amount is a standalone number near the "Gold" label
         (typically just below its coin icon). We pick whichever detected
         number sits closest to a "Gold" label; if the label wasn't read
-        this frame, fall back to the first number found (reading order).
+        this frame, fall back to the first number found (reading order) --
+        UNLESS require_label is set, in which case we'd rather report no
+        gold than guess. This matters for the periodic re-check done on an
+        already-open window (see _check_for_new_chest_content): once gold
+        has actually been collected, the "Gold" label disappears from the
+        popup entirely, and blindly falling back to "first number found"
+        can grab an unrelated number (e.g. the Loot Rating score) and
+        misread it as a brand new, larger gold amount -- wrongly signaling
+        that a whole new chest appeared. The initial full read of a
+        freshly-opened chest doesn't have this risk (gold is essentially
+        always present and labeled at that point), so it still uses the
+        fallback.
         """
         if not numeric_lines:
             return 0
@@ -925,6 +1022,9 @@ class LootDetector:
                     + (self._box_center(nb[1])[1] - gy) ** 2
                 ),
             )
+            return numeric_lines[0][0]
+        if require_label:
+            return 0
         return numeric_lines[0][0]
 
     # ------------------------------------------------------------------
