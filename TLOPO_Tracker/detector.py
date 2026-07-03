@@ -155,7 +155,7 @@ MIN_REGION_FRACTION = 0.01  # candidate region must cover at least 1% of screen 
 # animation, floating combat text passing over the window, a brief OCR
 # hiccup) should not be treated as a close -- otherwise the still-open
 # popup gets re-detected as a "new" one a moment later and double-logged.
-ABSENCE_CONFIRM_SECONDS = 1.2
+ABSENCE_CONFIRM_SECONDS = 0.6
 
 # EasyOCR (like most OCR engines) reads small text much less reliably
 # than larger text -- game UI text captured at native resolution is
@@ -182,7 +182,13 @@ NAME_REREAD_UPSCALE_FACTOR = 8.0
 @dataclass
 class DetectorSettings:
     poll_interval_ms: int = 500
-    post_close_cooldown_s: float = 2.0
+    # Time the window sits in cooldown (no fresh-detection search) after
+    # its popup is confirmed closed, purely to let a closing fade
+    # animation's leftover parchment pixels clear before they're mistaken
+    # for a new popup at the same spot. Lowered from 2.0s and exposed in
+    # Settings so a same-spot reopen (e.g. rapid multi-character looting)
+    # doesn't have to wait as long to be picked up.
+    post_close_cooldown_s: float = 0.4
     hsv_targets: Optional[dict] = None  # overrides loot_parser.DEFAULT_HSV_TARGETS
     parchment_rgb: Optional[Tuple[int, int, int]] = None       # overrides DEFAULT_PARCHMENT_RGB
     parchment_tolerance: Optional[int] = None                  # overrides DEFAULT_PARCHMENT_TOLERANCE
@@ -588,6 +594,7 @@ class LootDetector:
 
         chest_type = None
         gold_label_boxes: List[tuple] = []
+        rating_box: Optional[tuple] = None
         numeric_lines: List[Tuple[int, tuple]] = []
         name_candidates: List[Tuple[str, tuple]] = []
 
@@ -606,18 +613,27 @@ class LootDetector:
                 continue
 
             if "rating" in lower:
+                rating_box = box
                 continue  # "Loot Rating:" label
 
-            if "take" in lower and ("small" in lower or "item" in lower):
-                continue  # "Take Small Items" button
+            # The button reads "Take Small Items" first, then changes to
+            # "Take It All" once the small items/gold have already been
+            # collected and only larger items (weapons/clothes) remain --
+            # matching only "small"/"item" missed that second state, and
+            # OCR noise can append stray characters (e.g. "Take It AllI"),
+            # so match loosely on "all" too rather than requiring an exact
+            # phrase.
+            if "take" in lower and ("small" in lower or "item" in lower or "all" in lower):
+                continue
 
-            if lower == "items":
+            if lower in ("items", "all"):
                 # The button label sometimes gets split across two OCR
-                # lines ("Take Small" / "Items") instead of being read as
-                # one -- the check above only catches lines containing
-                # "take", so a lone leftover "Items" line would otherwise
-                # slip through as a fake untagged loot item now that
-                # untagged/currency items are kept rather than discarded.
+                # lines ("Take Small" / "Items", or "Take It" / "All")
+                # instead of being read as one -- the check above only
+                # catches lines containing "take", so a lone leftover
+                # "Items"/"All" line would otherwise slip through as a
+                # fake untagged loot item now that untagged/currency items
+                # are kept rather than discarded.
                 continue
 
             digits_only = re.sub(r"[^0-9]", "", stripped)
@@ -632,6 +648,21 @@ class LootDetector:
             # or the banner text wasn't captured/read cleanly this frame).
             print("[TLOPO detect] no chest-type title matched in OCR text -- discarding frame", flush=True)
             return None
+
+        if rating_box is not None and numeric_lines:
+            # The "Loot Rating:" score sits on the same row as its label,
+            # just to the right of it -- exclude any number sharing that
+            # row so it's never mistaken for the gold amount once gold has
+            # already been collected and no "Gold" label is left on
+            # screen to anchor against (the fallback-to-first-number logic
+            # in _extract_gold would otherwise grab it instead).
+            ry1, ry2 = rating_box[1], rating_box[3]
+            r_center_y = (ry1 + ry2) / 2.0
+            row_tolerance = max(5, ry2 - ry1)
+            numeric_lines = [
+                (val, box) for val, box in numeric_lines
+                if abs((box[1] + box[3]) / 2.0 - r_center_y) > row_tolerance
+            ]
 
         gold = self._extract_gold(gold_label_boxes, numeric_lines)
 
