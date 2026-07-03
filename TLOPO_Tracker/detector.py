@@ -184,6 +184,18 @@ DEFAULT_PARCHMENT_TOLERANCE = 30  # per-channel tolerance
 # actual captured screen size, not literal pixel counts.
 MIN_REGION_FRACTION = 0.01  # candidate region must cover at least 1% of screen area
 
+# The top padding _find_loot_window adds to pull in the chest-type banner
+# also drags in a strip of whatever's on screen just above the popup -- in
+# practice this is sometimes a nearby player's floating nameplate (name +
+# level, e.g. "Fireball LV50"), which then gets OCR'd and misread as a
+# bogus untagged loot item on every single chest that session (a real,
+# tester-confirmed artifact, distinct from the earlier transient
+# frame-to-frame OCR noise). Nameplates always end in "LV<number>" (OCR
+# sometimes mangles the digits into O/S/I look-alikes, e.g. "LVSO" for
+# "LV50"), so any candidate line matching that shape is filtered out
+# before it can be logged as an item.
+NAMEPLATE_LEVEL_RE = re.compile(r"(?i)\blv[\s.]*[0-9oOsSil]{1,3}\b")
+
 # The popup must be absent for this many CONSECUTIVE seconds before we
 # consider it actually closed. A single missed frame (a flickering
 # animation, floating combat text passing over the window, a brief OCR
@@ -957,6 +969,7 @@ class LootDetector:
 
         gold = self._extract_gold(gold_label_boxes, numeric_lines)
 
+        name_candidates = self._strip_nameplate_lines(name_candidates)
         name_candidates = self._merge_wrapped_item_lines(name_candidates)
 
         items: List[LootItem] = []
@@ -1018,6 +1031,58 @@ class LootDetector:
     def _box_center(box: tuple) -> Tuple[float, float]:
         x1, y1, x2, y2 = box
         return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+    @staticmethod
+    def _strip_nameplate_lines(candidates: List[Tuple[str, tuple]]) -> List[Tuple[str, tuple]]:
+        """
+        Nearby players render a floating two-line nameplate over the game
+        world: "Name LV##" on top, and their crew name in caps directly
+        underneath (e.g. "Fireskull LV50" / "DARK ARCHIVE", "Zion LV50" /
+        "ALCHEMIST" -- confirmed via a live reference screenshot). If a
+        player is standing close enough when a loot popup opens, this
+        floating text falls inside the popup's captured region and both
+        lines get OCR'd as bogus untagged items.
+
+        The "Name LV##" line is caught by NAMEPLATE_LEVEL_RE. The crew-tag
+        line below it has no pattern of its own to match against, so it's
+        dropped by proximity to a matched level line instead -- both a
+        tight vertical gap (the same heuristic _merge_wrapped_item_lines
+        uses to detect a stacked pair, just used here to discard rather
+        than merge) AND horizontal overlap. The horizontal check matters:
+        without it, a real item sitting anywhere in the popup's item grid
+        at roughly the same row height as the nameplate bleed -- but in a
+        completely different column -- would get wrongly stripped too,
+        since a floating nameplate's two lines are narrow and roughly
+        centered on the same spot, not spread across the whole row.
+        """
+        anchors = [box for text, box in candidates if NAMEPLATE_LEVEL_RE.search(text)]
+        if not anchors:
+            return candidates
+
+        def near_anchor(box: tuple) -> bool:
+            bx1, by1, bx2, by2 = box
+            for ax1, ay1, ax2, ay2 in anchors:
+                anchor_h = ay2 - ay1
+                gap = max(ay1 - by2, by1 - ay2, 0)
+                if gap > max(8, anchor_h * 0.6):
+                    continue
+                x_overlap = min(bx2, ax2) - max(bx1, ax1)
+                if x_overlap > 0:
+                    return True
+            return False
+
+        kept = []
+        for text, box in candidates:
+            if NAMEPLATE_LEVEL_RE.search(text):
+                print(f"[TLOPO detect] candidate {text!r} skipped: matches "
+                      f"nameplate 'Name LV##' pattern", flush=True)
+                continue
+            if near_anchor(box):
+                print(f"[TLOPO detect] candidate {text!r} skipped: adjacent "
+                      f"to nameplate level line (likely a crew tag)", flush=True)
+                continue
+            kept.append((text, box))
+        return kept
 
     @staticmethod
     def _merge_wrapped_item_lines(candidates: List[Tuple[str, tuple]]) -> List[Tuple[str, tuple]]:
