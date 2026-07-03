@@ -54,8 +54,11 @@ MAX_CLOSE_COOLDOWN_MS = 3000
 PRESET_TARGETS = [
     "Palifico", "Crash", "Koleniko", "Neban the Silent", "Jimmy Legs",
     "Cicatriz", "Remington the Vicious", "General Darkhart", "General Hex",
-    "Drench", "Drizzle", "Gold Room Enemies", "Cursed Caverns Enemies",
-    "Forsaken Shallows Enemies", "Custom...",
+    "The Twins (Drench & Drizzle)", "Drench", "Drizzle",
+    "El Patron", "Foulberto Smasho", "Jolly Roger",
+    "Gold Room Enemies", "Cursed Caverns Enemies",
+    "Forsaken Shallows Enemies", "El Patron's Mine Enemies",
+    "Raven's Cove Enemies", "Custom...",
 ]
 
 BG = "#20242b"
