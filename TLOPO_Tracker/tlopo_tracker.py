@@ -18,6 +18,7 @@ import threading
 import time
 import traceback
 from datetime import datetime
+from typing import List
 from tkinter import (
     Tk, Toplevel, Frame, Label, Button, Entry, StringVar, IntVar,
     Listbox, Scrollbar, Text, END, DISABLED, NORMAL, messagebox, ttk, BOTH,
@@ -521,6 +522,10 @@ class TLOPOTrackerApp:
     # Chest detection -> session log -> UI refresh
     # ------------------------------------------------------------------
     def _handle_chest_detected(self, result: ChestResult):
+        if result.is_amendment:
+            self._handle_chest_amended(result)
+            return
+
         if not result.target:
             result.target = self.session.active_target or "Unknown"
         named_hits = self.session.log_chest(result)
@@ -533,41 +538,71 @@ class TLOPOTrackerApp:
             if item.rarity == "Legendary":
                 self._show_legendary_alert(item.name)
 
-    def _append_loot_log_row(self, result: ChestResult):
+    def _handle_chest_amended(self, result: ChestResult):
+        """
+        Late-arriving correction to an already-logged chest (see
+        detector.py's session accumulation / LootDetector._finalize_session)
+        -- an item that hadn't finished rendering on the very first frame,
+        or a higher gold amount that only became readable later. Adds the
+        extra loot to the existing log entry without re-counting the
+        chest itself as a new one.
+        """
+        named_hits = self.session.amend_chest(result.session_id, result.items, result.gold)
+        if result.items or result.gold:
+            self._append_amendment_log_row(result)
+            self._flash_ui()
+        self._refresh_all()
+
+        for item in named_hits:
+            if item.rarity == "Legendary":
+                self._show_legendary_alert(item.name)
+
+    def _insert_loot_items(self, items: List[LootItem]):
         hide_common = self.settings.get("hide_common", True)
         hide_uncommon = self.settings.get("hide_uncommon", False)
 
         display_items = []
-        for item in result.items:
+        for item in items:
             if item.rarity == "Common" and hide_common:
                 continue
             if item.rarity == "Uncommon" and hide_uncommon:
                 continue
             display_items.append(item)
 
+        if not display_items and not items:
+            self.loot_text.insert(END, "(no items read)", "meta")
+            return
+
+        for item in display_items:
+            if item.rarity == "Legendary":
+                self.loot_text.insert(END, f"★ {item.name} (Legendary) ", "Legendary_row")
+            elif item.rarity == "Famed":
+                self.loot_text.insert(END, f"{item.name} (Famed) ", "Famed_bold")
+            elif item.rarity is None:
+                # Untagged currency/filler item (Gold, gems, playing
+                # cards) -- real loot, just not rarity-colored in-game,
+                # so no parenthetical tag or rarity-specific coloring.
+                self.loot_text.insert(END, f"{item.name} ", "meta")
+            else:
+                self.loot_text.insert(END, f"{item.name} ({item.rarity}) ", item.rarity)
+
+    def _append_loot_log_row(self, result: ChestResult):
         self.loot_text.configure(state=NORMAL)
         prefix = f"[{result.timestamp}] [{result.target}] [{result.chest_type}] — "
-        has_legendary = any(i.rarity == "Legendary" for i in result.items)
-
         self.loot_text.insert(END, prefix, "meta")
-
-        if not display_items and not result.items:
-            self.loot_text.insert(END, "(no items read)", "meta")
-        else:
-            for i, item in enumerate(display_items):
-                if item.rarity == "Legendary":
-                    self.loot_text.insert(END, f"★ {item.name} (Legendary) ", "Legendary_row")
-                elif item.rarity == "Famed":
-                    self.loot_text.insert(END, f"{item.name} (Famed) ", "Famed_bold")
-                elif item.rarity is None:
-                    # Untagged currency/filler item (Gold, gems, playing
-                    # cards) -- real loot, just not rarity-colored in-game,
-                    # so no parenthetical tag or rarity-specific coloring.
-                    self.loot_text.insert(END, f"{item.name} ", "meta")
-                else:
-                    self.loot_text.insert(END, f"{item.name} ({item.rarity}) ", item.rarity)
-
+        self._insert_loot_items(result.items)
         self.loot_text.insert(END, f" — {result.gold}g\n", "meta")
+        self.loot_text.configure(state=DISABLED)
+        self.loot_text.see(END)
+
+    def _append_amendment_log_row(self, result: ChestResult):
+        self.loot_text.configure(state=NORMAL)
+        prefix = f"[{result.timestamp}] [{result.target}] (more loot found in same chest) — "
+        self.loot_text.insert(END, prefix, "meta")
+        if result.items:
+            self._insert_loot_items(result.items)
+        gold_suffix = f" — +{result.gold}g\n" if result.gold else "\n"
+        self.loot_text.insert(END, gold_suffix, "meta")
         self.loot_text.configure(state=DISABLED)
         self.loot_text.see(END)
 
