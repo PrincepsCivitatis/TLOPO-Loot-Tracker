@@ -182,9 +182,59 @@ class Session:
             "items": [{"name": i.name, "rarity": i.rarity} for i in result.items],
             "gold": result.gold,
             "kill_number": stats.kills,
+            "session_id": result.session_id,
         })
 
         self._notify("chest_logged", result)
+        return named_hits
+
+    def amend_chest(self, session_id: str, extra_items: List[LootItem], extra_gold: int) -> List[LootItem]:
+        """
+        Adds late-arriving content to an ALREADY-logged chest, identified
+        by session_id, without incrementing the chest-open counters again
+        -- this is the same physical chest, not a new one. See
+        detector.py's LootDetector._finalize_session for why a chest can
+        need amending (an item that hadn't finished rendering on the very
+        first frame, or a higher gold amount that only became readable
+        later) and where session_id comes from. extra_gold of 0 means
+        "no gold correction needed"; otherwise it's the corrected total
+        for this chest, replacing (not adding to) what was first logged.
+
+        Returns the list of Famed/Legendary items among extra_items (for
+        triggering GUI alerts), same contract as log_chest.
+        """
+        target_stats = None
+        entry = None
+        for stats in self.targets.values():
+            for row in stats.loot_log:
+                if row.get("session_id") == session_id:
+                    target_stats = stats
+                    entry = row
+                    break
+            if entry is not None:
+                break
+
+        if target_stats is None:
+            # No matching row (shouldn't normally happen) -- fall back to
+            # the active target so this loot is never silently dropped,
+            # even without a loot_log row to attach it to for export.
+            target_stats = self._ensure_active()
+            if target_stats is None:
+                return []
+        elif entry is not None:
+            entry["items"].extend({"name": i.name, "rarity": i.rarity} for i in extra_items)
+            if extra_gold:
+                entry["gold"] = extra_gold
+
+        named_hits: List[LootItem] = []
+        for item in extra_items:
+            if item.rarity in target_stats.rarity_counts:
+                target_stats.rarity_counts[item.rarity] += 1
+            if item.is_named_tier():
+                self._record_named_item(item, target_stats.name)
+                named_hits.append(item)
+
+        self._notify("chest_amended", (session_id, extra_items, extra_gold))
         return named_hits
 
     def _record_named_item(self, item: LootItem, target_name: str):

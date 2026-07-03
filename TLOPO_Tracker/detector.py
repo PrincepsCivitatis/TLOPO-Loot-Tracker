@@ -8,11 +8,13 @@ Tk GUI stays responsive. Never touches game files or the network -- it
 only reads pixels off the screen.
 """
 
+import difflib
 import platform
 import re
 import threading
 import time
 import traceback
+import uuid
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
@@ -157,6 +159,21 @@ MIN_REGION_FRACTION = 0.01  # candidate region must cover at least 1% of screen 
 # popup gets re-detected as a "new" one a moment later and double-logged.
 ABSENCE_CONFIRM_SECONDS = 0.6
 
+# While a loot window's popup is being tracked as open (a "session" --
+# see LootDetector._start_session/_accumulate_session/_finalize_session),
+# it gets re-OCR'd on this cadence and merged into a running record of
+# everything seen for that session, rather than trusting only the very
+# first frame. This is deliberately much slower than the cheap
+# pixel-coverage presence check (which can run every poll_interval_ms
+# tick for almost no cost) since this does a real OCR pass. The merge is
+# ADDITIVE ONLY -- items/gold ever seen are kept, never removed or
+# compared against each other to guess whether something "changed" -- so
+# a chest whose icons hadn't finished rendering on the very first frame,
+# or a partial-take (Take Small Items) that leaves fewer items on screen
+# afterward, both resolve correctly with no risk of the false "new
+# chest" duplicates an earlier growth-comparison approach produced.
+SESSION_RESCAN_INTERVAL_S = 0.5
+
 # EasyOCR (like most OCR engines) reads small text much less reliably
 # than larger text -- game UI text captured at native resolution is
 # often small enough that individual letters get confused with similar-
@@ -226,6 +243,31 @@ class LootDetector:
         self._cooldown_until = 0.0
         self._first_absent_at: Optional[float] = None
         self._last_known_box: Optional[Tuple[int, int, int, int]] = None
+
+        # "Session" state -- everything observed for the current loot
+        # popup instance, accumulated additively across repeated OCR
+        # passes (see SESSION_RESCAN_INTERVAL_S) rather than compared
+        # frame-to-frame. _session_id is a fresh uuid per session, used
+        # to correlate a later amendment (see _finalize_session) back to
+        # the loot-log row the provisional emission created.
+        self._session_id: Optional[str] = None
+        self._session_chest_type: Optional[str] = None
+        self._session_items: dict = {}          # {(name, rarity): LootItem}
+        self._session_gold: int = 0             # max labeled gold seen this session
+        # What had already been emitted in the PROVISIONAL (first) log for
+        # this session, so _finalize_session can compute just the delta
+        # (if any) to send as a correction, instead of re-emitting
+        # everything and double-counting.
+        self._session_provisional_items: dict = {}
+        self._session_provisional_gold: int = 0
+        # Last-seen chest button phase ("small" / "all" / None) for the
+        # Layer 2 check: a real chest's button only ever moves forward
+        # (Take Small Items -> Take It All), so seeing it revert to
+        # "small" while still nominally the same session is unambiguous
+        # proof a different chest just opened in the same spot without
+        # the parchment ever visibly disappearing in between.
+        self._session_button_state: Optional[str] = None
+        self._last_session_scan_at: float = 0.0
 
         self.active_target_getter: Optional[Callable[[], str]] = None
         self.kill_number_getter: Optional[Callable[[], int]] = None
@@ -408,6 +450,9 @@ class LootDetector:
             mask = self._parchment_mask(frame)
             if self._region_still_present(mask, self._last_known_box):
                 self._first_absent_at = None
+                if now - self._last_session_scan_at >= SESSION_RESCAN_INTERVAL_S:
+                    self._last_session_scan_at = now
+                    self._accumulate_session(frame, self._last_known_box)
                 return
 
             # Coverage dropped in the tracked spot -- might still just be a
@@ -421,6 +466,7 @@ class LootDetector:
                 self._window_present_last = False
                 self._last_known_box = None
                 self._first_absent_at = None
+                self._finalize_session()
             return
 
         # Not currently tracking a window -- run the strict fresh-detection
@@ -432,12 +478,158 @@ class LootDetector:
         self._window_present_last = True
         self._last_known_box = region
         self._first_absent_at = None
+        self._last_session_scan_at = now
         self.on_status_change("Loot window detected — reading...")
 
         result = self._read_loot_window(frame, region)
         if result is not None:
-            self.on_chest_detected(result)
+            self._start_session(result)
         self.on_status_change("Waiting for TLOPO...")
+
+    # ------------------------------------------------------------------
+    # Session accumulation (see SESSION_RESCAN_INTERVAL_S)
+    # ------------------------------------------------------------------
+    # Similarity ratio (difflib.SequenceMatcher) above which two item
+    # names read on different frames of the same session are treated as
+    # the same item, not two different ones. Repeated OCR passes of the
+    # exact same on-screen text can spell it slightly differently frame
+    # to frame (observed for real: "Bright Pink Cotton" read correctly
+    # once, then "Bright Pink Coitn" on a later re-read of the identical
+    # item) -- without this, a session's item union would treat every
+    # such variant as a brand new item and inflate the eventual
+    # amendment with near-duplicates of things already logged.
+    ITEM_NAME_FUZZY_MATCH_RATIO = 0.75
+
+    @classmethod
+    def _fuzzy_item_match(cls, name: str, rarity, seen: dict) -> Optional[tuple]:
+        """Returns the (name, rarity) key in `seen` that `name`/`rarity`
+        is a near-match for, or None if there isn't one. See
+        ITEM_NAME_FUZZY_MATCH_RATIO."""
+        best_key, best_ratio = None, 0.0
+        for seen_name, seen_rarity in seen:
+            if seen_rarity != rarity:
+                continue
+            ratio = difflib.SequenceMatcher(None, name.lower(), seen_name.lower()).ratio()
+            if ratio >= cls.ITEM_NAME_FUZZY_MATCH_RATIO and ratio > best_ratio:
+                best_key, best_ratio = (seen_name, seen_rarity), ratio
+        return best_key
+
+    @classmethod
+    def _merge_item_into(cls, items: dict, item: LootItem) -> None:
+        """Adds `item` into the `items` dict (keyed by (name, rarity)),
+        fuzzy-matching against existing entries first so repeated re-OCRs
+        of the same on-screen item (see ITEM_NAME_FUZZY_MATCH_RATIO) merge
+        into one entry rather than appearing as separate items. When two
+        reads of the same item disagree, keeps whichever spelling is
+        longer as a (rough, not guaranteed) proxy for "more complete"."""
+        key = (item.name, item.rarity)
+        if key in items:
+            return
+        existing_key = cls._fuzzy_item_match(item.name, item.rarity, items)
+        if existing_key is None:
+            items[key] = item
+        elif len(item.name) > len(existing_key[0]):
+            del items[existing_key]
+            items[key] = item
+
+    def _start_session(self, result: ChestResult) -> None:
+        session_id = uuid.uuid4().hex[:12]
+        self._session_id = session_id
+        self._session_chest_type = result.chest_type
+        self._session_items = {(i.name, i.rarity): i for i in result.items}
+        self._session_gold = result.gold
+        self._session_button_state = result.button_state
+        self._session_provisional_items = dict(self._session_items)
+        self._session_provisional_gold = result.gold
+
+        result.session_id = session_id
+        self.on_chest_detected(result)
+
+    def _accumulate_session(self, frame: np.ndarray, box) -> None:
+        """
+        Re-OCRs an already-tracked (still visibly open) loot window and
+        merges it into the running session record. Deliberately does NOT
+        compare this read against the session's current state to decide
+        whether anything "changed" -- that comparison approach was tried
+        twice and broke both times (an incomplete first-frame read looked
+        like later growth; unrelated on-screen OCR noise near the popup
+        looked like new items). Instead every item/gold amount ever seen
+        this session just gets merged in, unconditionally, and reconciled
+        once at _finalize_session.
+
+        The one exception is BUTTON_STATE (Layer 2): the chest button can
+        only ever progress forward (Take Small Items -> Take It All) for
+        one real chest. Seeing it revert to "small" while the parchment
+        never actually disappeared is the one unambiguous signal that a
+        different chest just opened in the same spot -- handled by
+        finalizing the current session and starting a fresh one right
+        here, rather than merging.
+        """
+        reread = self._read_loot_window(frame, box)
+        if reread is None:
+            return
+
+        if self._session_button_state == "all" and reread.button_state == "small":
+            print(f"[TLOPO detect] session {self._session_id}: button reverted to "
+                  f"'Take Small Items' mid-session -- treating as a new chest", flush=True)
+            self._finalize_session()
+            self._start_session(reread)
+            return
+
+        for item in reread.items:
+            self._merge_item_into(self._session_items, item)
+        if reread.gold > self._session_gold:
+            self._session_gold = reread.gold
+        if not self._session_chest_type:
+            self._session_chest_type = reread.chest_type
+        if reread.button_state is not None:
+            self._session_button_state = reread.button_state
+
+    def _finalize_session(self) -> None:
+        """
+        Called once a session's popup is confirmed closed. If the fully
+        accumulated record found anything beyond what the provisional
+        (first) log already reported -- an item that hadn't finished
+        rendering on the very first frame, or a higher gold amount that
+        became readable later -- emits a correction, tagged as an
+        amendment to the SAME session_id rather than a new chest, so the
+        GUI/session layer can add the extra loot without double-counting
+        the chest-open itself.
+        """
+        session_id = self._session_id
+        if session_id is None:
+            return
+
+        new_items = [
+            item for (name, rarity), item in self._session_items.items()
+            if (name, rarity) not in self._session_provisional_items
+            and self._fuzzy_item_match(name, rarity, self._session_provisional_items) is None
+        ]
+        gold_delta = self._session_gold if self._session_gold > self._session_provisional_gold else 0
+
+        if new_items or gold_delta:
+            print(f"[TLOPO detect] session {session_id} finalized with late-arriving "
+                  f"content: new_items={[i.name for i in new_items]} "
+                  f"gold_delta={gold_delta}", flush=True)
+            amendment = ChestResult(
+                chest_type=self._session_chest_type or "",
+                items=new_items,
+                gold=gold_delta,
+                timestamp=time.strftime("%H:%M:%S"),
+                target=self.active_target_getter() if self.active_target_getter else "",
+                kill_number=self.kill_number_getter() if self.kill_number_getter else 0,
+                session_id=session_id,
+                is_amendment=True,
+            )
+            self.on_chest_detected(amendment)
+
+        self._session_id = None
+        self._session_chest_type = None
+        self._session_items = {}
+        self._session_gold = 0
+        self._session_provisional_items = {}
+        self._session_provisional_gold = 0
+        self._session_button_state = None
 
     # ------------------------------------------------------------------
     # Window region detection (color-based, resolution independent)
@@ -593,6 +785,7 @@ class LootDetector:
             return None
 
         chest_type = None
+        button_state: Optional[str] = None
         gold_label_boxes: List[tuple] = []
         rating_box: Optional[tuple] = None
         numeric_lines: List[Tuple[int, tuple]] = []
@@ -624,6 +817,13 @@ class LootDetector:
             # so match loosely on "all" too rather than requiring an exact
             # phrase.
             if "take" in lower and ("small" in lower or "item" in lower or "all" in lower):
+                # Distinguishes the button's two phases for the session
+                # Layer 2 check (see LootDetector._accumulate_session) --
+                # "all" without "small" means "Take It All" is showing.
+                if "all" in lower and "small" not in lower:
+                    button_state = "all"
+                else:
+                    button_state = "small"
                 continue
 
             if lower in ("items", "all"):
@@ -720,6 +920,7 @@ class LootDetector:
             timestamp=time.strftime("%H:%M:%S"),
             target=target or "",
             kill_number=kill_number or 0,
+            button_state=button_state,
         )
 
     @staticmethod

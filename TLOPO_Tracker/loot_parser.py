@@ -168,6 +168,21 @@ class ChestResult:
     timestamp: str = ""
     target: str = ""
     kill_number: int = 0
+    # Internal bookkeeping for the detector's session-based accumulation
+    # (see detector.py LootDetector._start_session/_finalize_session) --
+    # not shown in exports beyond session_id tagging a loot_log row so a
+    # later amendment can find it again.
+    session_id: Optional[str] = None
+    # True for a follow-up correction to an already-logged chest (late-
+    # arriving items/gold discovered after the initial log), rather than
+    # a brand new chest. When True, `items`/`gold` hold only what's NEW
+    # since the original log, not the chest's full contents.
+    is_amendment: bool = False
+    # "small" (Take Small Items showing) / "all" (Take It All showing) /
+    # None (button not read this frame) -- internal signal only, used to
+    # detect a chest reopening in the same spot without ever properly
+    # closing (see detector.py's Layer 2 mid-session split).
+    button_state: Optional[str] = None
 
     def chest_key(self) -> str:
         """Return 'pouch' / 'chest' / 'skull' short key for counters."""
