@@ -44,6 +44,12 @@ WINDOW_W, WINDOW_H = 440, 750
 MIN_POLL_INTERVAL_MS = 10
 MAX_POLL_INTERVAL_MS = 5000
 
+# Bounds for the post-chest-close cooldown (see DetectorSettings.post_close_cooldown_s
+# in detector.py). Used to briefly ignore a spot right after a popup closes so a
+# fading-out animation's leftover pixels aren't mistaken for a new popup there.
+MIN_CLOSE_COOLDOWN_MS = 0
+MAX_CLOSE_COOLDOWN_MS = 3000
+
 PRESET_TARGETS = [
     "Palifico", "Crash", "Koleniko", "Neban the Silent", "Jimmy Legs",
     "Cicatriz", "Remington the Vicious", "General Darkhart", "General Hex",
@@ -115,6 +121,7 @@ class TLOPOTrackerApp:
             on_error=self._detector_on_error,
             settings=DetectorSettings(
                 poll_interval_ms=self.settings.get("poll_interval_ms", 500),
+                post_close_cooldown_s=self.settings.get("close_cooldown_ms", 400) / 1000.0,
                 hsv_targets=self.settings.get("hsv_targets", DEFAULT_HSV_TARGETS),
                 parchment_rgb=tuple(self.settings.get("parchment_rgb", DEFAULT_PARCHMENT_RGB)),
                 parchment_tolerance=self.settings.get("parchment_tolerance", DEFAULT_PARCHMENT_TOLERANCE),
@@ -157,6 +164,7 @@ class TLOPOTrackerApp:
     def _load_settings(self):
         default = {
             "poll_interval_ms": 500,
+            "close_cooldown_ms": 400,
             "hide_common": True,
             "hide_uncommon": False,
             "hsv_targets": copy.deepcopy(DEFAULT_HSV_TARGETS),
@@ -732,6 +740,16 @@ class TLOPOTrackerApp:
         poll_var = StringVar(value=str(self.settings.get("poll_interval_ms", 500)))
         Entry(parent, textvariable=poll_var, width=10).pack(anchor=W, padx=10, pady=(2, 0))
 
+        Label(parent, text="Chest close cooldown (ms)", bg=BG, fg=FG).pack(anchor=W, padx=10, pady=(10, 0))
+        Label(parent, text=f"Type a number ({MIN_CLOSE_COOLDOWN_MS}-{MAX_CLOSE_COOLDOWN_MS}). After a\n"
+                            "loot popup closes, this is how long that same spot is ignored\n"
+                            "before a new one there counts, to avoid double-counting a fading-\n"
+                            "out animation as a new chest. Lower this if a chest sometimes\n"
+                            "doesn't get picked up right after another one closed.",
+              bg=BG, fg=GREY, justify=LEFT, font=("Segoe UI", 8)).pack(anchor=W, padx=10)
+        cooldown_var = StringVar(value=str(self.settings.get("close_cooldown_ms", 400)))
+        Entry(parent, textvariable=cooldown_var, width=10).pack(anchor=W, padx=10, pady=(2, 0))
+
         hide_common_var = BooleanVar(value=self.settings.get("hide_common", True))
         Checkbutton(parent, text="Hide Common items in loot log", variable=hide_common_var,
                     bg=BG, fg=FG, selectcolor=PANEL_BG, activebackground=BG).pack(anchor=W, padx=10, pady=(8, 0))
@@ -802,7 +820,23 @@ class TLOPOTrackerApp:
                 )
                 return
 
+            try:
+                cooldown_ms = int(cooldown_var.get().strip())
+            except (ValueError, AttributeError):
+                messagebox.showwarning(
+                    APP_TITLE, f"Chest close cooldown must be a whole number between "
+                               f"{MIN_CLOSE_COOLDOWN_MS} and {MAX_CLOSE_COOLDOWN_MS}."
+                )
+                return
+            if not (MIN_CLOSE_COOLDOWN_MS <= cooldown_ms <= MAX_CLOSE_COOLDOWN_MS):
+                messagebox.showwarning(
+                    APP_TITLE, f"Chest close cooldown must be between "
+                               f"{MIN_CLOSE_COOLDOWN_MS} and {MAX_CLOSE_COOLDOWN_MS} ms."
+                )
+                return
+
             self.settings["poll_interval_ms"] = poll_ms
+            self.settings["close_cooldown_ms"] = cooldown_ms
             self.settings["hide_common"] = hide_common_var.get()
             self.settings["hide_uncommon"] = hide_uncommon_var.get()
             self.settings["export_folder"] = folder_var.get().strip() or default_export_folder()
@@ -819,6 +853,7 @@ class TLOPOTrackerApp:
             self._save_settings()
             if self.detector:
                 self.detector.settings.poll_interval_ms = self.settings["poll_interval_ms"]
+                self.detector.settings.post_close_cooldown_s = self.settings["close_cooldown_ms"] / 1000.0
                 self.detector.settings.hsv_targets = hsv_targets
                 self.detector.settings.parchment_rgb = tuple(new_parchment_rgb)
                 self.detector.settings.parchment_tolerance = self.settings["parchment_tolerance"]
