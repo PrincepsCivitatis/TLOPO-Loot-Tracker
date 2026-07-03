@@ -187,7 +187,20 @@ MIN_REGION_FRACTION = 0.01  # candidate region must cover at least 1% of screen 
 # animation, floating combat text passing over the window, a brief OCR
 # hiccup) should not be treated as a close -- otherwise the still-open
 # popup gets re-detected as a "new" one a moment later and double-logged.
-ABSENCE_CONFIRM_SECONDS = 1.2
+ABSENCE_CONFIRM_SECONDS = 0.6
+
+# While a loot window is being tracked as open, we periodically re-OCR it
+# and compare against the highest item count/gold seen so far for that
+# instance (see _seen_item_count/_seen_gold in LootDetector). This is
+# what lets a SECOND,
+# DIFFERENT chest opened in the exact same screen spot (very common when
+# rapidly farming -- one chest closes and the next opens before the
+# ABSENCE_CONFIRM_SECONDS + post_close_cooldown_s gap would otherwise
+# elapse) get caught and logged immediately, instead of only ever being
+# caught after the full close/cooldown cycle. Throttled independently of
+# the (often much faster) poll interval since this does a real OCR pass,
+# not just a cheap pixel-coverage check.
+CONTENT_RECHECK_INTERVAL_S = 0.75
 
 # EasyOCR (like most OCR engines) reads small text much less reliably
 # than larger text -- game UI text captured at native resolution is
@@ -214,7 +227,19 @@ NAME_REREAD_UPSCALE_FACTOR = 8.0
 @dataclass
 class DetectorSettings:
     poll_interval_ms: int = 500
-    post_close_cooldown_s: float = 2.0
+    # Time a window sits in cooldown (no fresh-detection search) after its
+    # popup is confirmed closed, purely to let a closing fade animation's
+    # leftover parchment pixels clear before they're mistaken for a new
+    # popup at the same spot. This used to default to 2.0s (on top of the
+    # old 1.2s ABSENCE_CONFIRM_SECONDS) and wasn't user-adjustable, which
+    # meant a window couldn't pick up a genuinely new chest for up to
+    # ~3.2s after the last one closed -- far too slow for fast
+    # multi-character/rapid-loot playstyles. Lowered and exposed in
+    # Settings; the CONTENT_RECHECK mechanism in LootDetector now catches
+    # most same-spot rapid reopens well before this cooldown would even
+    # matter, so this is mainly a safety net for the fade-animation case
+    # it was originally added for.
+    post_close_cooldown_s: float = 0.4
     hsv_targets: Optional[dict] = None  # overrides loot_parser.DEFAULT_HSV_TARGETS
     parchment_rgb: Optional[Tuple[int, int, int]] = None       # overrides DEFAULT_PARCHMENT_RGB
     parchment_tolerance: Optional[int] = None                  # overrides DEFAULT_PARCHMENT_TOLERANCE
@@ -261,6 +286,25 @@ class LootDetector:
         self._cooldown_until: dict = {}
         self._first_absent_at: dict = {}
         self._last_known_box: dict = {}
+
+        # Tracks the HIGHEST item count / gold amount seen so far for the
+        # CURRENT loot window instance at each window_key, so a periodic
+        # re-read while the window is still open can tell "player is
+        # taking items one at a time / hit Take Small Items" (count/gold
+        # only ever shrinks from here on -- never re-logged) apart from "a
+        # new, different chest opened in this same screen spot" (count or
+        # gold goes ABOVE anything seen so far -- only possible if the old
+        # popup was actually replaced by a new one, since taking items can
+        # never add to what's on screen). Deliberately count-based rather
+        # than tracking individual item names: two different chests can
+        # easily drop the same-named item (including two different Famed/
+        # Legendary drops in a row), and a name-based "already seen this
+        # exact name" check would wrongly swallow the second one instead
+        # of logging it. Reset to 0 whenever a window is confirmed closed.
+        # See CONTENT_RECHECK_INTERVAL_S and _check_for_new_chest_content.
+        self._seen_item_count: dict = {}
+        self._seen_gold: dict = {}
+        self._last_content_check_at: dict = {}
 
         self.active_target_getter: Optional[Callable[[], str]] = None
         self.kill_number_getter: Optional[Callable[[], int]] = None
@@ -463,6 +507,9 @@ class LootDetector:
             mask = self._parchment_mask(frame)
             if self._region_still_present(mask, last_box):
                 self._first_absent_at[window_key] = None
+                if now - self._last_content_check_at.get(window_key, 0.0) >= CONTENT_RECHECK_INTERVAL_S:
+                    self._last_content_check_at[window_key] = now
+                    self._check_for_new_chest_content(frame, last_box, window_key)
                 return True
 
             # Coverage dropped in the tracked spot -- might still just be a
@@ -476,6 +523,8 @@ class LootDetector:
                 self._window_present[window_key] = False
                 self._last_known_box[window_key] = None
                 self._first_absent_at[window_key] = None
+                self._seen_item_count[window_key] = 0
+                self._seen_gold[window_key] = 0
             return False
 
         # Not currently tracking a window -- run the strict fresh-detection
@@ -487,12 +536,66 @@ class LootDetector:
         self._window_present[window_key] = True
         self._last_known_box[window_key] = region
         self._first_absent_at[window_key] = None
+        self._last_content_check_at[window_key] = now
         self.on_status_change("Loot window detected — reading...")
 
         result = self._read_loot_window(frame, region)
         if result is not None:
+            self._seen_item_count[window_key] = len(result.items)
+            self._seen_gold[window_key] = result.gold
             self.on_chest_detected(result)
+        else:
+            self._seen_item_count[window_key] = 0
+            self._seen_gold[window_key] = 0
         return True
+
+    def _check_for_new_chest_content(self, frame: np.ndarray, box, window_key) -> None:
+        """
+        Re-OCRs an already-tracked (still visibly open) loot window and
+        compares its item count / gold against the highest seen so far for
+        this instance (_seen_item_count/_seen_gold). Taking items out of
+        the popup one at a time, or hitting "Take Small Items" (which
+        removes gold and small currency items but leaves weapons/clothes
+        on screen until pressed again), can only ever make the visible
+        item count and gold shrink from here -- so that's left alone,
+        never re-logged.
+
+        If instead the item count or gold reads HIGHER than anything seen
+        so far, that can only mean a fresh, different chest opened in this
+        same screen spot before the old one was confirmed closed (taking
+        items never adds more to the screen) -- most likely because the
+        whole open-close-reopen happened faster than
+        ABSENCE_CONFIRM_SECONDS could register the popup as ever having
+        gone away. In that case the entire current read is logged as a new
+        ChestResult. This is deliberately NOT restricted to just the
+        "new" items by name -- two different chests can easily drop an
+        item with the same name (including two different Famed/Legendary
+        drops in a row), and by the time a new chest's popup is showing,
+        the previous one's popup (and its now-claimed-or-abandoned items)
+        is already gone, so the full current read IS the new chest's
+        contents.
+        """
+        reread = self._read_loot_window(frame, box)
+        if reread is None:
+            return
+
+        seen_count = self._seen_item_count.get(window_key, 0)
+        seen_gold = self._seen_gold.get(window_key, 0)
+        current_count = len(reread.items)
+
+        if current_count > seen_count or reread.gold > seen_gold:
+            print(f"[TLOPO detect] new chest content detected at same spot: "
+                  f"items={[i.name for i in reread.items]} gold={reread.gold} "
+                  f"(previous seen_count={seen_count} seen_gold={seen_gold})", flush=True)
+            self.on_chest_detected(reread)
+            self._seen_item_count[window_key] = current_count
+            self._seen_gold[window_key] = reread.gold
+        # else: current read is a subset of (or equal to) what's already been
+        # logged -- items being taken, or a one-frame OCR undercount. Baseline
+        # is intentionally NEVER lowered here: if it tracked the current
+        # (possibly transient) low count instead of the running max, a later
+        # frame simply reading the same still-open chest correctly again
+        # would look like "growth" and get wrongly logged a second time.
 
     # ------------------------------------------------------------------
     # Window region detection (color-based, resolution independent)

@@ -211,6 +211,15 @@ carry across your whole session, no matter how many targets you farm.
   to miss a container that opens and closes quickly. Setting it very
   low does make your computer work harder (more screenshots per
   second), so only lower it as much as you actually need.
+- If you're running multiple TLOPO windows at once (see the multi-
+  character note above) and swapping between characters quickly to
+  open chests back-to-back, and a chest right after another one
+  closes doesn't get picked up: open Settings and lower the "Chest
+  close cooldown" number. This controls how long the tracker waits
+  after a chest closes before it'll count a new one appearing in that
+  same spot - the default is short enough for most play, but if you're
+  clicking between windows and looting faster than that, lowering it
+  (down to 0ms if needed) closes the gap.
 - If the tracker window ever crashes, just double-click
   START_TRACKER.bat again (or re-run start_tracker.sh on Mac). Your
   session is automatically saved every minute, and the tracker will
