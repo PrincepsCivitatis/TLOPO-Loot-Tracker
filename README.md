@@ -2,12 +2,25 @@
 
 A free Windows desktop companion for **The Legend of Pirates Online (TLOPO)** that watches your screen while you play, automatically reads loot popups when you open a chest, and keeps a running log of everything you've found.
 
+## Which version should I download?
+
+This repo has three branches/release tracks. They all share the same core loot-tracking engine — the difference is single- vs multi-window support and how thoroughly a feature has been tested.
+
+| You are... | Get this |
+|---|---|
+| A normal player who plays one character at a time | **Main** — [`main` branch](../../tree/main), tagged releases like `v0.06`. Most tested, single-character/single-window only. |
+| Running multiple TLOPO characters/windows at once | **This branch (`experimental/multi-character`)** — tagged releases like `v0.04-experimental`. Alpha-tested and generally working, but still less proven than `main`. **You're already looking at the right README.** |
+| Want to help test the newest features first | **Experimental Alpha** — [`experimental-alpha` branch](../../tree/experimental-alpha), tagged releases like `v0.03-alpha`. Newest multi-window features land here before being promoted to this branch — untested, may have bugs. |
+
+All builds are on the [**Releases**](../../releases) page, distinguishable by their tag suffix (`vX.XX` = main, `vX.XX-experimental` = multi-character, `vX.XX-alpha` = experimental alpha).
+
 ## What it does
 
 - **Auto-detects loot popups** ("Plundered Loot Pouch/Chest/Skull Chest!") the moment they appear on screen — no manual entry needed for loot.
 - **Reads item rarity by text color** (Common, Uncommon, Rare, Famed, Legendary) using OCR and color analysis.
 - **Tracks every Famed and Legendary item by name**, with a running count of how many of each you've gotten, visible at all times.
 - **Per-target session stats**: kills (manual +1/+5/+10 buttons), pouch/chest/skull chest counts, and skull-chest drop rate — tracked separately for each boss/enemy you farm, plus combined session totals.
+- **Auto-detects boss kills and your farming target** for a growing list of named bosses, by watching the boss's on-screen health bar and nameplate — no need to click +1 or change the target dropdown yourself. Auto-detected kills are shown alongside your manual count (e.g. `12 (9 auto)`) so you can compare the two. **Caveats:** this only works for named bosses on the tracker's known list one-on-one — it does **not** yet work for common/regular enemies, and does **not** work well when killing a whole group of enemies at once (e.g. farming the Bridge or the Hornets), where you should keep using the manual kill buttons. Support for all enemy types is planned for a future release.
 - **Exports your session** to a formatted Excel workbook (3 sheets: summary, named item log, full loot log) or a plain text file, saved straight to your Desktop.
 - **Runs alongside the game**, always-on-top, and never touches game files or the network — it only reads what's on your screen. On Windows, detection is scoped to just the TLOPO game window itself while it's focused, so other things on your screen (Discord, a browser, etc.) can't be mistaken for the game.
 
