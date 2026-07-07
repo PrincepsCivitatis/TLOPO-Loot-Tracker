@@ -42,6 +42,13 @@ class NamedItemRecord:
 class TargetStats:
     name: str
     kills: int = 0
+    # Subset of `kills` that came from the health-bar auto-detector rather
+    # than a manual +1/+5/+10/Set click (see Session.add_auto_kill). Kept
+    # as a separate running count -- not a replacement for `kills` -- so
+    # a miscount from the (heuristic) auto-detector is easy to spot by
+    # comparing against manual clicks, rather than being silently mixed
+    # into one number.
+    auto_kills: int = 0
     pouches: int = 0
     chests: int = 0
     skull_chests: int = 0
@@ -57,6 +64,7 @@ class TargetStats:
         return {
             "name": self.name,
             "kills": self.kills,
+            "auto_kills": self.auto_kills,
             "pouches": self.pouches,
             "chests": self.chests,
             "skull_chests": self.skull_chests,
@@ -68,6 +76,7 @@ class TargetStats:
     def from_dict(d):
         t = TargetStats(name=d["name"])
         t.kills = d.get("kills", 0)
+        t.auto_kills = d.get("auto_kills", 0)
         t.pouches = d.get("pouches", 0)
         t.chests = d.get("chests", 0)
         t.skull_chests = d.get("skull_chests", 0)
@@ -137,6 +146,21 @@ class Session:
         if stats is None:
             return
         stats.kills = max(0, amount)
+        self._notify("kills_changed", stats.kills)
+
+    def add_auto_kill(self):
+        """
+        Records a kill detected automatically by the boss health-bar
+        tracker (detector.py LootDetector.on_kill_detected), rather than
+        a manual +1/+5/+10/Set click. Still increments the same `kills`
+        total the rest of the app reads, but also bumps `auto_kills` so
+        the two can be compared -- see TargetStats.auto_kills.
+        """
+        stats = self._ensure_active()
+        if stats is None:
+            return
+        stats.kills = max(0, stats.kills + 1)
+        stats.auto_kills += 1
         self._notify("kills_changed", stats.kills)
 
     def _ensure_active(self) -> Optional[TargetStats]:
@@ -256,6 +280,7 @@ class Session:
         total = TargetStats(name="TOTAL")
         for stats in self.targets.values():
             total.kills += stats.kills
+            total.auto_kills += stats.auto_kills
             total.pouches += stats.pouches
             total.chests += stats.chests
             total.skull_chests += stats.skull_chests

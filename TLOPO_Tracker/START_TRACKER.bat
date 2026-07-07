@@ -1,9 +1,9 @@
 @echo off
-title TLOPO Loot Tracker
+title TLOPO Loot Tracker - EXPERIMENTAL-ALPHA (untested multi-window)
 color 0B
 
 echo ============================================================
-echo   Starting TLOPO Loot Tracker...
+echo   Starting TLOPO Loot Tracker -- EXPERIMENTAL-ALPHA (untested multi-window)
 echo ============================================================
 echo.
 
