@@ -28,7 +28,7 @@ from tkinter import (
 
 from loot_parser import (
     ChestResult, LootItem, RARITY_ORDER, RARITY_DISPLAY_HEX,
-    DEFAULT_HSV_TARGETS, HSV_TARGETS_VERSION,
+    DEFAULT_HSV_TARGETS, HSV_TARGETS_VERSION, KNOWN_BOSS_NAMES,
 )
 from session import Session
 from exporter import export_to_excel, export_to_text, default_export_folder
@@ -51,11 +51,13 @@ MAX_POLL_INTERVAL_MS = 5000
 MIN_CLOSE_COOLDOWN_MS = 0
 MAX_CLOSE_COOLDOWN_MS = 3000
 
-PRESET_TARGETS = [
-    "Palifico", "Crash", "Koleniko", "Neban the Silent", "Jimmy Legs",
-    "Cicatriz", "Remington the Vicious", "General Darkhart", "General Hex",
-    "The Twins (Drench & Drizzle)", "Drench", "Drizzle",
-    "El Patron", "Foulberto Smasho", "Jolly Roger",
+# Boss names come from loot_parser.KNOWN_BOSS_NAMES -- the same canonical
+# list the health-bar nameplate auto-detector (detector.py
+# _detect_boss_name) matches OCR reads against, so a name picked here and
+# a name auto-detected in-game are always spelled identically (GitHub
+# issue #3). The farming-location group entries below aren't individual
+# bosses, so they have nothing to match against and stay tracker-local.
+PRESET_TARGETS = KNOWN_BOSS_NAMES + [
     "Gold Room Enemies", "Cursed Caverns Enemies",
     "Forsaken Shallows Enemies", "El Patron's Mine Enemies",
     "Raven's Cove Enemies", "Custom...",
@@ -123,6 +125,8 @@ class TLOPOTrackerApp:
             on_chest_detected=self._detector_on_chest,
             on_status_change=self._detector_on_status,
             on_error=self._detector_on_error,
+            on_kill_detected=self._detector_on_kill,
+            on_target_detected=self._detector_on_target_detected,
             settings=DetectorSettings(
                 poll_interval_ms=self.settings.get("poll_interval_ms", 500),
                 post_close_cooldown_s=self.settings.get("close_cooldown_ms", 400) / 1000.0,
@@ -475,6 +479,12 @@ class TLOPOTrackerApp:
     def _detector_on_chest(self, result: ChestResult):
         self.event_queue.put(("chest", result))
 
+    def _detector_on_kill(self):
+        self.event_queue.put(("kill", None))
+
+    def _detector_on_target_detected(self, name: str):
+        self.event_queue.put(("target_detected", name))
+
     def _detector_on_status(self, text: str):
         self.event_queue.put(("status", text))
 
@@ -499,6 +509,10 @@ class TLOPOTrackerApp:
                 kind, payload = self.event_queue.get_nowait()
                 if kind == "chest":
                     self._handle_chest_detected(payload)
+                elif kind == "kill":
+                    self._handle_auto_kill_detected()
+                elif kind == "target_detected":
+                    self._handle_auto_target_detected(payload)
                 elif kind == "status":
                     self.status_var.set(payload)
                 elif kind == "error":
@@ -550,6 +564,36 @@ class TLOPOTrackerApp:
         for item in named_hits:
             if item.rarity == "Legendary":
                 self._show_legendary_alert(item.name)
+
+    def _handle_auto_kill_detected(self):
+        """
+        Boss health-bar auto-detector confirmed a kill (detector.py
+        LootDetector.on_kill_detected). Silently no-ops if no target is
+        set yet -- unlike the manual +1 button, there's no user action
+        here to attach a warning dialog to.
+        """
+        if self.session.active_target is None:
+            return
+        self.session.add_auto_kill()
+        self._refresh_all()
+
+    def _handle_auto_target_detected(self, name: str):
+        """
+        Boss health-bar nameplate OCR confirmed a fresh encounter against
+        a known boss (detector.py LootDetector.on_target_detected --
+        already snapped to a canonical, correctly-spelled name via
+        loot_parser.match_known_boss_name). Auto-selects it the same way
+        the dropdown + Set Target button would, so the player still gets
+        the same manual override at any time -- a later manual pick just
+        stays in effect until the next fresh encounter is auto-detected.
+        """
+        if name not in PRESET_TARGETS:
+            return
+        self.target_var.set(name)
+        self._on_target_combo_change()
+        self.session.set_target(name)
+        self.active_target_label.config(text=f"Farming: {name}")
+        self._refresh_all()
 
     def _handle_chest_amended(self, result: ChestResult):
         """
@@ -642,7 +686,10 @@ class TLOPOTrackerApp:
     def _refresh_all(self):
         stats = self.session.get_active_stats()
         if stats:
-            self.kills_var.set(str(stats.kills))
+            if stats.auto_kills:
+                self.kills_var.set(f"{stats.kills} ({stats.auto_kills} auto)")
+            else:
+                self.kills_var.set(str(stats.kills))
             self.pouches_var.set(f"Pouches: {stats.pouches}")
             self.chests_var.set(f"Chests: {stats.chests}")
             self.skulls_var.set(f"Skull Chests: {stats.skull_chests}")

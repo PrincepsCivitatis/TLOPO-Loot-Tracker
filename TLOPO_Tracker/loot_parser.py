@@ -8,6 +8,7 @@ tested / reused independently of the GUI and detector.
 """
 
 import colorsys
+import difflib
 import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -227,3 +228,50 @@ class ChestResult:
         if "Chest" in self.chest_type:
             return "chest"
         return "pouch"
+
+
+# ---------------------------------------------------------------------------
+# Known boss/enemy names (GitHub issue #3 -- boss nameplate auto-detection)
+# ---------------------------------------------------------------------------
+
+# Canonical, correctly-spelled boss names. This is the single source of
+# truth for both the GUI's target dropdown (tlopo_tracker.py PRESET_TARGETS
+# is built from this) and the pool the health-bar-triggered nameplate OCR
+# read snaps against (see detector.py LootDetector._detect_boss_name /
+# match_known_boss_name below) -- so an auto-set target is always one of
+# these exact spellings, never whatever imperfect text OCR produced.
+KNOWN_BOSS_NAMES = [
+    "Palifico", "Crash", "Koleniko", "Neban the Silent", "Jimmy Legs",
+    "Cicatriz", "Remington the Vicious", "General Darkhart", "General Hex",
+    "The Twins (Drench & Drizzle)", "Drench", "Drizzle",
+    "El Patron", "Foulberto Smasho", "Jolly Roger",
+]
+
+# Lower than ITEM_NAME_FUZZY_MATCH_RATIO (detector.py, 0.75) -- confirmed
+# against real screenshots, the boss nameplate reads cleanly ("Remington
+# the Vicious" OCR'd exactly, ratio 1.0), but the threshold still needs
+# room for a worse read than the loot popup's own text tends to produce
+# (smaller font, busier background behind it) without silently rejecting
+# a genuine match.
+BOSS_NAME_FUZZY_MATCH_RATIO = 0.6
+
+
+def match_known_boss_name(ocr_text: str, candidates: Optional[List[str]] = None) -> Optional[str]:
+    """
+    Fuzzy-matches a noisy nameplate OCR read against KNOWN_BOSS_NAMES (or
+    a caller-supplied candidate list), returning the correctly-spelled
+    name it's most likely trying to say, or None if nothing matches
+    closely enough to trust.
+    """
+    text = ocr_text.strip().lower()
+    if not text:
+        return None
+    pool = candidates if candidates is not None else KNOWN_BOSS_NAMES
+    best_name, best_ratio = None, 0.0
+    for name in pool:
+        ratio = difflib.SequenceMatcher(None, text, name.lower()).ratio()
+        if ratio > best_ratio:
+            best_name, best_ratio = name, ratio
+    if best_ratio >= BOSS_NAME_FUZZY_MATCH_RATIO:
+        return best_name
+    return None
