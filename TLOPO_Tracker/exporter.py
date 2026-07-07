@@ -11,21 +11,21 @@ from loot_parser import RARITY_ORDER
 from session import Session
 
 RARITY_FILL_HEX = {
-    "Common": "D9D9D9",
-    "Uncommon": "FFF2A8",
+    "Crude": "D9D9D9",
+    "Common": "FFF2A8",
     "Rare": "C6EFCE",
     "Famed": "BDD7EE",
     "Legendary": "FFC7CE",
 }
 RARITY_FONT_HEX = {
-    "Common": "595959",
-    "Uncommon": "9C6500",
+    "Crude": "595959",
+    "Common": "9C6500",
     "Rare": "006100",
     "Famed": "1F4E78",
     "Legendary": "9C0006",
 }
 
-RARITY_SORT_INDEX = {"Legendary": 0, "Famed": 1, "Rare": 2, "Uncommon": 3, "Common": 4}
+RARITY_SORT_INDEX = {"Legendary": 0, "Famed": 1, "Rare": 2, "Common": 3, "Crude": 4}
 
 
 def default_export_folder() -> str:
@@ -62,7 +62,7 @@ def export_to_excel(session: Session, folder: Optional[str] = None) -> str:
     ws1 = wb.active
     ws1.title = "Session Summary"
     headers1 = ["Target", "Kills", "Pouches", "Chests", "Skull Chests", "Skull Rate",
-                "Common", "Uncommon", "Rare", "Famed", "Legendary"]
+                "Crude", "Common", "Rare", "Famed", "Legendary"]
     ws1.append(headers1)
     for c in ws1[1]:
         c.font = Font(bold=True)
@@ -72,8 +72,8 @@ def export_to_excel(session: Session, folder: Optional[str] = None) -> str:
         row = [
             stats.name, stats.kills, stats.pouches, stats.chests, stats.skull_chests,
             f"{stats.skull_rate():.1f}%",
+            stats.rarity_counts.get("Crude", 0),
             stats.rarity_counts.get("Common", 0),
-            stats.rarity_counts.get("Uncommon", 0),
             stats.rarity_counts.get("Rare", 0),
             stats.rarity_counts.get("Famed", 0),
             stats.rarity_counts.get("Legendary", 0),
@@ -90,8 +90,8 @@ def export_to_excel(session: Session, folder: Optional[str] = None) -> str:
     ws1.append([
         "TOTAL", total.kills, total.pouches, total.chests, total.skull_chests,
         f"{total.skull_rate():.1f}%",
+        total.rarity_counts.get("Crude", 0),
         total.rarity_counts.get("Common", 0),
-        total.rarity_counts.get("Uncommon", 0),
         total.rarity_counts.get("Rare", 0),
         total.rarity_counts.get("Famed", 0),
         total.rarity_counts.get("Legendary", 0),
@@ -200,9 +200,9 @@ def export_to_text(session: Session, folder: Optional[str] = None) -> str:
             f"Skull Chests: {stats.skull_chests} ({stats.skull_rate():.1f}% skull rate)"
         )
         lines.append(
-            "Common: {c} | Uncommon: {u} | Rare: {r} | Famed: {f} | Legendary: {l}".format(
-                c=stats.rarity_counts.get("Common", 0),
-                u=stats.rarity_counts.get("Uncommon", 0),
+            "Crude: {c} | Common: {u} | Rare: {r} | Famed: {f} | Legendary: {l}".format(
+                c=stats.rarity_counts.get("Crude", 0),
+                u=stats.rarity_counts.get("Common", 0),
                 r=stats.rarity_counts.get("Rare", 0),
                 f=stats.rarity_counts.get("Famed", 0),
                 l=stats.rarity_counts.get("Legendary", 0),
@@ -256,9 +256,9 @@ def export_to_text(session: Session, folder: Optional[str] = None) -> str:
         f"({total.skull_rate():.1f}% rate)"
     )
     lines.append(
-        "Common: {c} | Uncommon: {u} | Rare: {r} | Famed: {f} | Legendary: {l}".format(
-            c=total.rarity_counts.get("Common", 0),
-            u=total.rarity_counts.get("Uncommon", 0),
+        "Crude: {c} | Common: {u} | Rare: {r} | Famed: {f} | Legendary: {l}".format(
+            c=total.rarity_counts.get("Crude", 0),
+            u=total.rarity_counts.get("Common", 0),
             r=total.rarity_counts.get("Rare", 0),
             f=total.rarity_counts.get("Famed", 0),
             l=total.rarity_counts.get("Legendary", 0),

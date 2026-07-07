@@ -28,7 +28,7 @@ from tkinter import (
 
 from loot_parser import (
     ChestResult, LootItem, RARITY_ORDER, RARITY_DISPLAY_HEX,
-    DEFAULT_HSV_TARGETS,
+    DEFAULT_HSV_TARGETS, HSV_TARGETS_VERSION,
 )
 from session import Session
 from exporter import export_to_excel, export_to_text, default_export_folder
@@ -169,9 +169,10 @@ class TLOPOTrackerApp:
         default = {
             "poll_interval_ms": 500,
             "close_cooldown_ms": 400,
-            "hide_common": True,
-            "hide_uncommon": False,
+            "hide_crude": True,
+            "hide_common": False,
             "hsv_targets": copy.deepcopy(DEFAULT_HSV_TARGETS),
+            "hsv_targets_version": HSV_TARGETS_VERSION,
             "parchment_rgb": list(DEFAULT_PARCHMENT_RGB),
             "parchment_tolerance": DEFAULT_PARCHMENT_TOLERANCE,
             "export_folder": default_export_folder(),
@@ -181,6 +182,15 @@ class TLOPOTrackerApp:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
+                # A saved hsv_targets dict from an older code version would
+                # otherwise silently win here and freeze rarity detection
+                # at stale hue values forever, even across future in-code
+                # recalibrations -- drop it and keep the fresh code default
+                # unless it was saved under the current version. See
+                # GitHub issue #5, sub-issue 3.
+                if loaded.get("hsv_targets_version") != HSV_TARGETS_VERSION:
+                    loaded.pop("hsv_targets", None)
+                    loaded["hsv_targets_version"] = HSV_TARGETS_VERSION
                 default.update(loaded)
             except Exception:
                 pass
@@ -561,14 +571,14 @@ class TLOPOTrackerApp:
                 self._show_legendary_alert(item.name)
 
     def _insert_loot_items(self, items: List[LootItem]):
-        hide_common = self.settings.get("hide_common", True)
-        hide_uncommon = self.settings.get("hide_uncommon", False)
+        hide_crude = self.settings.get("hide_crude", True)
+        hide_common = self.settings.get("hide_common", False)
 
         display_items = []
         for item in items:
-            if item.rarity == "Common" and hide_common:
+            if item.rarity == "Crude" and hide_crude:
                 continue
-            if item.rarity == "Uncommon" and hide_uncommon:
+            if item.rarity == "Common" and hide_common:
                 continue
             display_items.append(item)
 
@@ -643,7 +653,7 @@ class TLOPOTrackerApp:
                 f"{stats.name}: {stats.kills} kills | Pouch {stats.pouches} "
                 f"Chest {stats.chests} Skull {stats.skull_chests} "
                 f"({stats.skull_rate():.1f}%)\n"
-                f"Common {r.get('Common',0)} | Uncommon {r.get('Uncommon',0)} | "
+                f"Crude {r.get('Crude',0)} | Common {r.get('Common',0)} | "
                 f"Rare {r.get('Rare',0)} | Famed {r.get('Famed',0)} | "
                 f"Legendary {r.get('Legendary',0)}"
             )
@@ -661,7 +671,7 @@ class TLOPOTrackerApp:
             f"ALL TARGETS: {total.kills} kills | Pouch {total.pouches} "
             f"Chest {total.chests} Skull {total.skull_chests} "
             f"({total.skull_rate():.1f}%)\n"
-            f"Common {r.get('Common',0)} | Uncommon {r.get('Uncommon',0)} | "
+            f"Crude {r.get('Crude',0)} | Common {r.get('Common',0)} | "
             f"Rare {r.get('Rare',0)} | Famed {r.get('Famed',0)} | "
             f"Legendary {r.get('Legendary',0)}"
         )
@@ -789,12 +799,12 @@ class TLOPOTrackerApp:
         cooldown_var = StringVar(value=str(self.settings.get("close_cooldown_ms", 400)))
         Entry(parent, textvariable=cooldown_var, width=10).pack(anchor=W, padx=10, pady=(2, 0))
 
-        hide_common_var = BooleanVar(value=self.settings.get("hide_common", True))
-        Checkbutton(parent, text="Hide Common items in loot log", variable=hide_common_var,
+        hide_crude_var = BooleanVar(value=self.settings.get("hide_crude", True))
+        Checkbutton(parent, text="Hide Crude items in loot log", variable=hide_crude_var,
                     bg=BG, fg=FG, selectcolor=PANEL_BG, activebackground=BG).pack(anchor=W, padx=10, pady=(8, 0))
 
-        hide_uncommon_var = BooleanVar(value=self.settings.get("hide_uncommon", False))
-        Checkbutton(parent, text="Hide Uncommon items in loot log", variable=hide_uncommon_var,
+        hide_common_var = BooleanVar(value=self.settings.get("hide_common", False))
+        Checkbutton(parent, text="Hide Common items in loot log", variable=hide_common_var,
                     bg=BG, fg=FG, selectcolor=PANEL_BG, activebackground=BG).pack(anchor=W, padx=10)
 
         Label(parent, text="HSV Hue Center per Rarity (0-360)", bg=BG, fg=FG,
@@ -876,8 +886,8 @@ class TLOPOTrackerApp:
 
             self.settings["poll_interval_ms"] = poll_ms
             self.settings["close_cooldown_ms"] = cooldown_ms
+            self.settings["hide_crude"] = hide_crude_var.get()
             self.settings["hide_common"] = hide_common_var.get()
-            self.settings["hide_uncommon"] = hide_uncommon_var.get()
             self.settings["export_folder"] = folder_var.get().strip() or default_export_folder()
             for rarity in RARITY_ORDER:
                 hsv_targets.setdefault(rarity, {})
@@ -886,6 +896,7 @@ class TLOPOTrackerApp:
                 hsv_targets[rarity].setdefault("v", DEFAULT_HSV_TARGETS[rarity]["v"])
                 hsv_targets[rarity].setdefault("tolerance", DEFAULT_HSV_TARGETS[rarity]["tolerance"])
             self.settings["hsv_targets"] = hsv_targets
+            self.settings["hsv_targets_version"] = HSV_TARGETS_VERSION
             new_parchment_rgb = [v.get() for v in parchment_vars]
             self.settings["parchment_rgb"] = new_parchment_rgb
             self.settings["parchment_tolerance"] = parchment_tol_var.get()

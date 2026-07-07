@@ -26,6 +26,7 @@ from loot_parser import (
     classify_rarity_from_rgb,
     clean_item_name,
     normalize_chest_type,
+    rgb_to_hsv_degrees,
 )
 
 # Title substring (case-insensitive) used to find the actual TLOPO game
@@ -329,6 +330,31 @@ class LootDetector:
         # the parchment ever visibly disappearing in between.
         self._session_button_state: dict = {}
         self._last_session_scan_at: dict = {}
+
+        # "Session" state -- everything observed for the current loot
+        # popup instance, accumulated additively across repeated OCR
+        # passes (see SESSION_RESCAN_INTERVAL_S) rather than compared
+        # frame-to-frame. _session_id is a fresh uuid per session, used
+        # to correlate a later amendment (see _finalize_session) back to
+        # the loot-log row the provisional emission created.
+        self._session_id: Optional[str] = None
+        self._session_chest_type: Optional[str] = None
+        self._session_items: dict = {}          # {(name, rarity): LootItem}
+        self._session_gold: int = 0             # max labeled gold seen this session
+        # What had already been emitted in the PROVISIONAL (first) log for
+        # this session, so _finalize_session can compute just the delta
+        # (if any) to send as a correction, instead of re-emitting
+        # everything and double-counting.
+        self._session_provisional_items: dict = {}
+        self._session_provisional_gold: int = 0
+        # Last-seen chest button phase ("small" / "all" / None) for the
+        # Layer 2 check: a real chest's button only ever moves forward
+        # (Take Small Items -> Take It All), so seeing it revert to
+        # "small" while still nominally the same session is unambiguous
+        # proof a different chest just opened in the same spot without
+        # the parchment ever visibly disappearing in between.
+        self._session_button_state: Optional[str] = None
+        self._last_session_scan_at: float = 0.0
 
         self.active_target_getter: Optional[Callable[[], str]] = None
         self.kill_number_getter: Optional[Callable[[], int]] = None
@@ -646,7 +672,19 @@ class LootDetector:
         finalizing the current session and starting a fresh one right
         here, rather than merging.
         """
-        reread = self._read_loot_window(frame, box)
+        # `box` is the region from when this session's window was FIRST
+        # detected, which the caller keeps reusing for the cheap per-poll
+        # presence check for the whole life of the session (see
+        # _scan_once) -- but the actual popup visibly shrinks as items get
+        # taken (Take Small Items / Take It All), so that original box can
+        # end up larger than the real current popup. Re-detecting the
+        # tight current blob here (only on this slower re-scan cadence,
+        # not the cheap per-poll check) keeps the OCR crop accurate as the
+        # popup shrinks. Falls back to the stale box if fresh detection
+        # momentarily misses, since the caller's presence check already
+        # confirmed something is still visibly there.
+        current_box = self._find_loot_window(frame) or box
+        reread = self._read_loot_window(frame, current_box)
         if reread is None:
             return
 
@@ -782,7 +820,8 @@ class LootDetector:
         mask = self._parchment_mask(frame)
 
         total_matching = int(mask.sum())
-        if total_matching < MIN_REGION_FRACTION * h * w:
+        min_required = MIN_REGION_FRACTION * h * w
+        if total_matching < min_required:
             return None
 
         try:
@@ -800,7 +839,7 @@ class LootDetector:
 
         for idx in order:
             size = sizes[idx]
-            if size < MIN_REGION_FRACTION * h * w:
+            if size < min_required:
                 break  # sorted descending -- everything after this is smaller too
 
             comp_id = idx + 1
@@ -960,7 +999,7 @@ class LootDetector:
         name_candidates = self._merge_wrapped_item_lines(name_candidates)
 
         items: List[LootItem] = []
-        for text, box in name_candidates:
+        for text, box, sub_boxes in name_candidates:
             name = clean_item_name(text)
             if len(name) < 2:
                 print(f"[TLOPO detect] candidate {text!r} skipped: cleaned name too short", flush=True)
@@ -980,6 +1019,28 @@ class LootDetector:
             # tag, rather than silently discarded.
             rarity = classify_rarity_from_rgb(color, self.settings.hsv_targets)
 
+            if rarity is None:
+                # An untagged candidate is normally a REAL currency/filler
+                # item (Gold, gems, playing cards), which the game always
+                # renders in bright cream/white text -- every genuine
+                # untagged item observed in testing sampled at ~42-47%
+                # brightness (value). A phantom item named "Ar" kept
+                # showing up specifically right after the popup shrank to
+                # its Take It All state, sampling at (22,13,6) -- only 8.6%
+                # value, dramatically darker than any real untagged item --
+                # consistent with it being a stray misdetected fragment of
+                # the dark "Take It All" button icon/border, not real text
+                # at all (GitHub issue #5). Dropping candidates this dark
+                # instead of logging them as a fake untagged item; the
+                # threshold (25%) sits comfortably between the noise case
+                # (8.6%) and every real untagged item seen so far (42%+).
+                _, _, v = rgb_to_hsv_degrees(color)
+                if v < 25:
+                    print(f"[TLOPO detect] candidate {name!r} skipped: "
+                          f"untagged and too dark (v={v:.1f}%) to be real "
+                          f"text -- likely a UI-chrome misdetection", flush=True)
+                    continue
+
             # Named items (especially Famed/Legendary) are tracked by EXACT
             # name match with a running count -- if OCR spells the same
             # item slightly differently between drops (a real, observed
@@ -990,8 +1051,28 @@ class LootDetector:
             # small name labels specifically -- re-reading just this box,
             # cropped tightly and blown up much further since it's now a
             # tiny image, gets meaningfully better character accuracy.
-            reread = self._reread_item_name(win, box)
-            print(f"[TLOPO detect] targeted re-OCR for {name!r}: reread={reread!r}", flush=True)
+            #
+            # For a wrapped multi-line name, re-OCR each ORIGINAL line
+            # separately and join using the order _merge_wrapped_item_lines
+            # already established, instead of re-OCR'ing the combined
+            # multi-line box as one blob. Testing showed the latter
+            # unreliably reorders lines when one is much shorter than the
+            # others (e.g. "Trousers" jumping in front of "Electric Blue
+            # Denim") -- re-OCR'ing each original single-line box avoids
+            # that since every single-line reread in testing has been
+            # reliable; only the multi-line blob re-read was not.
+            if len(sub_boxes) > 1:
+                part_rereads = [self._reread_item_name(win, sub_box) for sub_box in sub_boxes]
+                print(f"[TLOPO detect] targeted re-OCR for merged name {name!r}: "
+                      f"per-line rereads={part_rereads!r}", flush=True)
+                if all(part_rereads):
+                    reread = " ".join(part_rereads)
+                else:
+                    reread = None
+            else:
+                reread = self._reread_item_name(win, box)
+                print(f"[TLOPO detect] targeted re-OCR for {name!r}: reread={reread!r}", flush=True)
+
             if reread and len(reread) >= len(name) - 2:
                 name = reread
 
@@ -1020,7 +1101,9 @@ class LootDetector:
         return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
 
     @staticmethod
-    def _merge_wrapped_item_lines(candidates: List[Tuple[str, tuple]]) -> List[Tuple[str, tuple]]:
+    def _merge_wrapped_item_lines(
+        candidates: List[Tuple[str, tuple]]
+    ) -> List[Tuple[str, tuple, List[tuple]]]:
         """
         Item names that wrap onto a second line (e.g. "Light Green" /
         "Seamed Tank" for one item called "Light Green Seamed Tank") are
@@ -1035,13 +1118,26 @@ class LootDetector:
         wrap) also share a similar left edge, but have noticeably more
         vertical spacing between them than two halves of one wrapped
         line do, so only a tight gap triggers a merge.
+
+        Returns (combined_text, combined_box, original_sub_boxes) --
+        the third element preserves each original line's own box in the
+        ALREADY-CORRECT top-to-bottom order established here. Callers
+        re-OCR'ing a merged multi-line name for spelling accuracy should
+        read each of these original single-line boxes separately and join
+        using this known order, rather than re-OCR'ing the combined
+        multi-line crop as one blob and trusting a second OCR pass to
+        reconstruct line order itself -- that was found in testing to
+        scramble order specifically when one line is much shorter than
+        the others (e.g. "Trousers" ending up before "Electric Blue
+        Denim"), see GitHub issue #5.
         """
         if len(candidates) < 2:
-            return candidates
+            return [(text, box, [box]) for text, box in candidates]
 
         ordered = sorted(candidates, key=lambda c: (c[1][1], c[1][0]))
-        merged: List[Tuple[str, tuple]] = []
+        merged: List[Tuple[str, tuple, List[tuple]]] = []
         current_text, current_box = ordered[0]
+        current_subs = [current_box]
 
         for text, box in ordered[1:]:
             cx1, cy1, cx2, cy2 = current_box
@@ -1049,17 +1145,42 @@ class LootDetector:
             vertical_gap = ny1 - cy2
             left_edge_diff = abs(nx1 - cx1)
 
-            if -2 <= vertical_gap <= 8 and left_edge_diff <= 15:
+            # Lower bound widened from -2 to -25 2026-07-07 after a real
+            # capture proved it too tight: "Dagger of the" + "Moon Idol"
+            # (one wrapped item, "Dagger of the Moon Idol") measured
+            # gap=-16, left_edge_diff=5 and failed to merge under the old
+            # -2 floor (GitHub issue #5). left_edge_diff is doing the real
+            # discrimination here, not the gap's lower bound -- every
+            # observed same-column-but-different-item pair in that same
+            # capture had left_edge_diff in the hundreds (different grid
+            # column) EXCEPT one (gap=39, left_edge_diff=3), which sits 55
+            # units above -25 with no observed real data anywhere near that
+            # gap, so widening the floor doesn't risk merging real separate
+            # items.
+            if -25 <= vertical_gap <= 8 and left_edge_diff <= 15:
                 print(f"[TLOPO detect] merging wrapped item name lines "
                       f"{current_text!r} + {text!r} (gap={vertical_gap}, "
                       f"left_edge_diff={left_edge_diff})", flush=True)
                 current_text = f"{current_text} {text}"
                 current_box = (min(cx1, nx1), min(cy1, ny1), max(cx2, nx2), max(cy2, ny2))
+                current_subs.append(box)
             else:
-                merged.append((current_text, current_box))
+                # Debug visibility for the REJECTED case -- the merge only
+                # ever printed on success, so a wrap that should have
+                # merged but didn't (GitHub issue #5, e.g. "Swordsman's
+                # Sabre") left no trace of the actual gap/left_edge_diff
+                # numbers that caused the rejection, making it impossible
+                # to tell whether the thresholds are just too tight versus
+                # this genuinely being two separate stacked items.
+                current_h = cy2 - cy1
+                print(f"[TLOPO detect] NOT merging {current_text!r} + {text!r} "
+                      f"(gap={vertical_gap}, left_edge_diff={left_edge_diff}, "
+                      f"current_line_height={current_h})", flush=True)
+                merged.append((current_text, current_box, current_subs))
                 current_text, current_box = text, box
+                current_subs = [box]
 
-        merged.append((current_text, current_box))
+        merged.append((current_text, current_box, current_subs))
         return merged
 
     def _extract_gold(
@@ -1176,11 +1297,19 @@ class LootDetector:
         except Exception:
             return None
 
-        fragments = [(bbox[0][0], text) for bbox, text, conf in results if conf >= 0.35]
+        # This crop isn't always a single line -- the wrapped-name merge
+        # (_merge_wrapped_item_lines) can hand this a box spanning TWO
+        # stacked lines (e.g. "Electric Blue Denim" / "Trousers"), and
+        # sorting fragments by X alone has no concept of "top line before
+        # bottom line": it reversed a real merged name into "Trousers
+        # Electric Blue Denim" in testing. Sort by Y (top-to-bottom) first,
+        # then X (left-to-right within a line), matching normal reading
+        # order for both the single- and multi-line case.
+        fragments = [(bbox[0][1], bbox[0][0], text) for bbox, text, conf in results if conf >= 0.35]
         if not fragments:
             return None
-        fragments.sort(key=lambda f: f[0])
-        combined = " ".join(clean_item_name(t) for _, t in fragments if clean_item_name(t))
+        fragments.sort(key=lambda f: (f[0], f[1]))
+        combined = " ".join(clean_item_name(t) for _, _, t in fragments if clean_item_name(t))
         return combined.strip() or None
 
     def _sample_text_color(self, crop: np.ndarray, box: tuple) -> Optional[Tuple[int, int, int]]:
