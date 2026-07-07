@@ -5,7 +5,7 @@ Note: this README file (only this file, not the application itself)
 was written with AI assistance.
 
 *** THIS BRANCH IS EXPERIMENTAL ***
-This branch ("experimental/multi-character") adds support for running
+This branch ("experimental-alpha") adds support for running
 multiple TLOPO windows at once (e.g. multiple characters logged in
 simultaneously) and detecting loot on each independently, instead of
 only the one window that currently has Windows' focus. This is newer
@@ -157,6 +157,41 @@ so the tracker can calculate your Skull Chest drop rate.
 You do NOT need to do anything for loot - the tracker watches your
 screen automatically and logs each chest the moment it appears,
 including the gold amount and every item's rarity.
+
+
+4B. NEW: AUTOMATIC KILL & TARGET DETECTION (NAMED BOSSES ONLY)
+------------------------------------------------------------------
+For a growing list of named bosses, the tracker can now do steps 3 and
+4 above for you automatically:
+
+  - The moment you engage a recognized boss, the tracker reads its
+    on-screen nameplate and switches your "Current Target" to match -
+    no need to pick it from the dropdown yourself.
+  - When that boss's health bar empties or disappears, the tracker
+    automatically counts a kill. Auto-detected kills are shown right
+    alongside your manual count, like "12 (9 auto)", so you can always
+    compare the two and spot anything that looks off.
+
+You can still set your target manually and click +1/+5/+10 at any
+time - manual actions always work exactly as before, and a manual
+target pick just stays in effect until the next auto-detected
+encounter starts.
+
+IMPORTANT - PLEASE READ BEFORE RELYING ON THIS:
+  - This ONLY works for BOSSES on the tracker's known-name list right
+    now, fought one-on-one. Common/regular enemies are NOT
+    auto-detected yet - you still need to click +1 (or +5/+10)
+    manually for those. Support for all enemy types is planned for a
+    future release.
+  - This does NOT work well when you're killing a whole GROUP of
+    enemies at once - for example farming the Bridge or the Hornets,
+    where several enemies (and health bars) are on screen and dying
+    together. Use the manual kill buttons for fights like those, the
+    same as before.
+  - If an auto-detected kill count ever looks off for a boss fight,
+    compare it against the "(N auto)" number shown next to your Kills
+    counter, and fall back to manual +1 clicks for the rest of that
+    fight if needed.
 
 
 5. FAMED AND LEGENDARY DROPS
