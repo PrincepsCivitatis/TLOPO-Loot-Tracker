@@ -17,28 +17,64 @@ from typing import List, Optional, Tuple
 # Rarity definitions
 # ---------------------------------------------------------------------------
 
-RARITY_ORDER = ["Common", "Uncommon", "Rare", "Famed", "Legendary"]
+RARITY_ORDER = ["Crude", "Common", "Rare", "Famed", "Legendary"]
+
+# Bump this whenever DEFAULT_HSV_TARGETS below changes. The saved settings
+# file stores the version it was written with; on load, a mismatch means
+# the user's file predates this recalibration, so the fresh code defaults
+# are used instead of the frozen old values (see tlopo_tracker.py
+# _load_settings). Without this, a hue recalibration shipped in code would
+# never actually take effect on any install that has ever saved settings,
+# since the saved hsv_targets dict otherwise always wins wholesale on load
+# (GitHub issue #5, sub-issue 3).
+#
+# Bumped to 3 for the Crude/Common tier rename -- a saved settings file
+# from before this rename has "Common"/"Uncommon" keys carrying the OLD
+# rarity's colors under the wrong (now reassigned) names, which would be
+# actively wrong to keep rather than just stale.
+#
+# Bumped to 4 for the Crude/Common hue recalibration below, measured from
+# real item-card screenshots cropped to just the title text (isolating it
+# from the shared italic subtitle line's color, which was contaminating
+# earlier whole-card samples) -- see GitHub issue #5.
+#
+# Bumped to 5 for the matching Rare/Famed/Legendary recalibration, same
+# title-cropped measurement method.
+HSV_TARGETS_VERSION = 5
 
 # Default HSV centers (H in degrees 0-360, S/V in 0-100) approximated from
 # the hex colors given in the spec. These are used as the *default* settings
 # and can be overridden at runtime via the Settings panel.
+# Tier names/order corrected 2026-07-07 -- the app originally shipped with
+# "Common"/"Uncommon" as the two lowest tiers, but TLOPO's real tier names
+# are Crude/Common (the code's "Common"/"Uncommon" were each one slot too
+# high). Renamed in place: same 5 slots, same colors, only the two lowest
+# labels changed (Crude=orange, Common=yellow) -- see GitHub issue #5.
 DEFAULT_HSV_TARGETS = {
-    "Common":    {"h": 28,  "s": 76, "v": 91, "tolerance": 18},   # Orange  #E87820
-    "Uncommon":  {"h": 53,  "s": 78, "v": 91, "tolerance": 18},   # Yellow  #E8D020
-    # Green/Rare: shifted from the spec's rough estimate (h=120, tolerance=22)
-    # after a real sampled Rare item ("Venomed Cutlass", RGB 42,60,26 ->
-    # hue ~92) fell just outside that window and got wrongly treated as
-    # untagged. Re-centered lower with a wider tolerance to cover it,
-    # while keeping enough of a gap from Uncommon's range (35-71) to
-    # avoid the two tiers colliding.
-    "Rare":      {"h": 108, "s": 84, "v": 78, "tolerance": 26},   # Green   #20C820
-    "Famed":     {"h": 226, "s": 77, "v": 91, "tolerance": 22},   # Blue    #2050E8
-    "Legendary": {"h": 0,   "s": 85, "v": 91, "tolerance": 18},   # Red     #E82020
+    # Crude/Common re-measured 2026-07-07 from real item-card title text
+    # (tools/color_sampler.py run against a tight crop of just the title
+    # word, isolating it from other card UI elements). Both centers'
+    # hue were already roughly right, but VALUE was notably too high in
+    # the old estimate -- these titles render noticeably less bright than
+    # assumed (Crude v=73 vs old 91, Common v=82 vs old 91).
+    "Crude":     {"h": 33,  "s": 83, "v": 73, "tolerance": 18},   # Orange  #B97520
+    "Common":    {"h": 60,  "s": 100, "v": 82, "tolerance": 18},   # Yellow #D1D100
+    # Rare/Famed/Legendary re-measured 2026-07-07 the same way as Crude/
+    # Common above (title-cropped item-card screenshots). All three had
+    # roughly correct hue already, but Rare and Famed's SATURATION was
+    # notably overestimated in the old defaults (Rare s=65 vs old 84,
+    # Famed s=60 vs old 77) -- Legendary barely moved, it was already
+    # close. Tolerance left unchanged for all three; only one real sample
+    # per tier so far isn't enough to justify retuning the tolerance band
+    # itself, just the centers.
+    "Rare":      {"h": 113, "s": 65, "v": 65, "tolerance": 26},   # Green   #46A53A
+    "Famed":     {"h": 221, "s": 60, "v": 91, "tolerance": 22},   # Blue    #5C89E7
+    "Legendary": {"h": 0,   "s": 90, "v": 89, "tolerance": 18},   # Red     #E31616
 }
 
 RARITY_DISPLAY_HEX = {
-    "Common": "#9A9A9A",     # rendered grey in log per spec (de-emphasized)
-    "Uncommon": "#E8D020",
+    "Crude": "#9A9A9A",     # rendered grey in log per spec (de-emphasized)
+    "Common": "#E8D020",
     "Rare": "#20C820",
     "Famed": "#2050E8",
     "Legendary": "#E82020",
