@@ -2,6 +2,18 @@
 
 A free Windows desktop companion for **The Legend of Pirates Online (TLOPO)** that watches your screen while you play, automatically reads loot popups when you open a chest, and keeps a running log of everything you've found.
 
+## Which version should I download?
+
+This repo has three branches/release tracks. They all share the same core loot-tracking engine — the difference is single- vs multi-window support and how thoroughly a feature has been tested.
+
+| You are... | Get this |
+|---|---|
+| A normal player who plays one character at a time | **This branch (`main`)** — tagged releases like `v0.06`. Most tested, single-character/single-window only. **You're already looking at the right README.** |
+| Running multiple TLOPO characters/windows at once | **Experimental (Multi-Character)** — [`experimental/multi-character` branch](../../tree/experimental/multi-character), tagged releases like `v0.04-experimental`. Alpha-tested and generally working, but still less proven than `main`. |
+| Want to help test the newest features first | **Experimental Alpha** — [`experimental-alpha` branch](../../tree/experimental-alpha), tagged releases like `v0.03-alpha`. Newest multi-window features land here before being promoted to the Multi-Character branch — untested, may have bugs. |
+
+All builds are on the [**Releases**](../../releases) page, distinguishable by their tag suffix (`vX.XX` = main, `vX.XX-experimental` = multi-character, `vX.XX-alpha` = experimental alpha).
+
 ## What it does
 
 - **Auto-detects loot popups** ("Plundered Loot Pouch/Chest/Skull Chest!") the moment they appear on screen — no manual entry needed for loot.

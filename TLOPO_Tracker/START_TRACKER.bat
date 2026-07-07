@@ -1,9 +1,9 @@
 @echo off
-title TLOPO Loot Tracker
+title TLOPO Loot Tracker - MAIN (single-window)
 color 0B
 
 echo ============================================================
-echo   Starting TLOPO Loot Tracker...
+echo   Starting TLOPO Loot Tracker -- MAIN branch (single-window)
 echo ============================================================
 echo.
 
