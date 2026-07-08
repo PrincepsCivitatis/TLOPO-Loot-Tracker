@@ -140,6 +140,19 @@ def _find_windows_game_windows(title_substring: str) -> List[Tuple[int, Tuple[in
             # window (e.g. a corner notification) without treating the
             # whole window as occluded, while still catching genuine
             # full/majority occlusion (e.g. Discord dragged fully over it).
+            #
+            # A sample point resolving to ANOTHER window from found_hwnds
+            # (i.e. another TLOPO window we're also tracking) counts as
+            # visible too, not just occluded -- with multiple characters'
+            # windows open at once, it's entirely normal for them to
+            # overlap each other on screen (e.g. cascaded/staggered
+            # placement), and the background window in that overlap is
+            # still a real, valid game window worth tracking, not
+            # something like a Discord overlay that should exclude it.
+            # Treating "covered by another TLOPO window" the same as
+            # "covered by anything else" was silently dropping secondary/
+            # tertiary character windows from detection entirely whenever
+            # they overlapped the foreground one (GitHub issue #9).
             sample_points = [
                 (left + width // 2, top + height // 2),
                 (left + width // 4, top + height // 4),
@@ -154,7 +167,7 @@ def _find_windows_game_windows(title_substring: str) -> List[Tuple[int, Tuple[in
                 if not hwnd_at_point:
                     continue
                 root = user32.GetAncestor(hwnd_at_point, GA_ROOT)
-                if root == hwnd:
+                if root == hwnd or root in found_hwnds:
                     visible_hits += 1
 
             if visible_hits < 3:  # majority of 5 sample points
