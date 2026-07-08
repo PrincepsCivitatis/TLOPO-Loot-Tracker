@@ -25,6 +25,7 @@ from loot_parser import (
     LootItem,
     classify_rarity_from_rgb,
     clean_item_name,
+    match_known_boss_name,
     normalize_chest_type,
     rgb_to_hsv_degrees,
 )
@@ -196,6 +197,138 @@ OCR_UPSCALE_FACTOR = 2.0
 # chest title would be.
 NAME_REREAD_UPSCALE_FACTOR = 8.0
 
+# The top padding _find_loot_window adds to pull in the chest-type banner
+# also drags in a strip of whatever's on screen just above the popup -- in
+# practice this is sometimes a nearby player's floating nameplate (name +
+# level, e.g. "Fireskull LV50"), which then gets OCR'd and misread as a
+# bogus untagged loot item on every single chest that session (a real,
+# tester-confirmed artifact, distinct from ordinary transient frame-to-
+# frame OCR noise). Nameplates always end in "LV<number>" (OCR sometimes
+# mangles the digits into O/S/I look-alikes, e.g. "LVSO" for "LV50"), so
+# any candidate line matching that shape is filtered out before it can be
+# logged as an item -- see LootDetector._strip_nameplate_lines.
+NAMEPLATE_LEVEL_RE = re.compile(r"(?i)\blv[\s.]*[0-9oOsSil]{1,3}\b")
+
+# Boss health bar kill tracking (GitHub issue #7). TLOPO has no
+# guaranteed loot drop, so kills can't be inferred from chest opens --
+# this watches the boss's on-screen health bar directly instead.
+#
+# Calibrated from real screenshots (tools/color_sampler.py) of
+# "Remington the Vicious"'s bar at high/mid/low health. Unlike the loot
+# popup's single parchment background, the bar's FILL renders in one of
+# three fixed colors depending on the current health tier -- green (high),
+# yellow (mid), red (low) -- confirmed against real screenshots, not a
+# single fill color with a gradient. A frame can also briefly show a
+# separate red "damage flash" segment layered over the tier color right
+# after a hit lands (cosmetic, drains on its own) -- that's covered by
+# the same red-tolerance match rather than treated as a fourth state.
+HEALTH_GREEN_RGB = np.array([24, 176, 24])
+HEALTH_YELLOW_RGB = np.array([252, 252, 24])
+HEALTH_RED_RGB = np.array([226, 8, 8])
+HEALTH_FILL_TOLERANCE = 40
+
+# The bar's empty/drained track is solid black, distinct from the loot
+# popup's tan parchment. Its share of the bar's own bounding box grows as
+# the bar drains (confirmed across the full/mid/low calibration
+# screenshots: track pixels were 3.6% / 6.5% / 11.2% of the whole frame
+# respectively), making it a reliable "not filled" anchor for computing
+# fill fraction.
+HEALTH_TRACK_RGB = np.array([0, 0, 0])
+HEALTH_TRACK_TOLERANCE = 20
+
+# Minimum contiguous fill+track region (fraction of screen area) to
+# consider as a candidate health bar -- much smaller than
+# MIN_REGION_FRACTION since the bar is a thin strip, not a popup-sized
+# panel.
+#
+# Calibrated against real gameplay logs at ~4K capture resolution (a
+# threshold sized off the tightly-cropped reference screenshots alone
+# was 10-20x too large -- on a real screen the bar is a tiny fraction of
+# the total frame, not a large fraction of a tight crop). Also worth
+# noting screen combat is often crowded with OTHER wide-strip health
+# bars of the same shape/color scheme -- the player's own HUD bar,
+# crew members' floating nameplate bars -- each individually small; the
+# per-component check below only needs to clear this lowered threshold
+# for ONE bar, with the boss-name OCR match (see _scan_health_bar) as
+# the real safeguard against mistakenly tracking one of those instead
+# of the actual boss.
+HEALTH_BAR_MIN_REGION_FRACTION = 0.00004
+
+# A health bar is a wide, short strip. Filters out unrelated green/
+# yellow/red/black blobs elsewhere on screen (chat text, floating combat
+# numbers, other UI chrome) that would otherwise pass the color mask.
+HEALTH_BAR_MIN_ASPECT_RATIO = 3.0
+
+# Caps how many size-ranked candidate bars _find_health_bar_candidates
+# returns per poll, and therefore how many nameplate OCR passes
+# _scan_health_bar will try before giving up for that poll -- bounds the
+# per-poll OCR cost while still giving the search enough tries to fall
+# through the player's own HUD bar / a crew member's bar to reach the
+# real boss bar when it isn't the single largest blob on screen.
+HEALTH_BAR_MAX_CANDIDATES = 4
+
+# Minimum time between candidate-matching OCR attempts while NOT
+# currently tracking a boss -- i.e. while every candidate blob found
+# keeps failing to match a known boss name (the player's own HUD bar,
+# nearby crew members' bars, etc., which are on screen almost
+# constantly). Without this throttle, _scan_health_bar would run up to
+# HEALTH_BAR_MAX_CANDIDATES real OCR passes on EVERY poll (every
+# poll_interval_ms) for as long as no boss fight is happening, which is
+# most of normal play -- a real, confirmed regression (GitHub issue #9:
+# noticeably slower OCR overall, and constant console spam from
+# candidates that never match) from the version of this feature first
+# shipped without this throttle. The cheap fill-color pixel-count check
+# still runs every poll either way; only the expensive OCR-driven
+# candidate match is rate-limited.
+HEALTH_CANDIDATE_OCR_INTERVAL_S = 2.0
+
+# Caps how far _extend_track_right will walk past the fill blob's own
+# right edge, as a multiple of that blob's width -- a full-health bar's
+# fill IS effectively the whole bar (little/no track to extend into), so
+# this needs enough headroom to find the true end-cap even then, while
+# still bounding a runaway walk into an unrelated dark area of the screen
+# that happens to abut the fill's edge.
+HEALTH_TRACK_EXTEND_MAX_FACTOR = 6.0
+
+# Caps how far _expand_bar_rows will walk past the fill blob's own
+# top/bottom edges, as a multiple of that blob's own height -- just
+# needs enough headroom to recover a few pixels of anti-aliased edge,
+# while bounding a runaway expansion into an unrelated dark area of the
+# screen (see _expand_bar_rows's docstring).
+HEALTH_BAR_ROW_EXPAND_MAX_FACTOR = 3.0
+
+# Once a bar is being tracked, _health_bar_density checks fill+track
+# pixel density within the bar's already-known (fixed) box to decide if
+# it's still genuinely on screen, rather than re-running the fresh-
+# detection search every poll -- same "cheap lenient check while
+# tracking, strict search only for a NEW window" split _region_still_
+# present uses for the loot popup. This is the density (fill+track
+# pixels / box area) below which the box is considered to no longer
+# show a real bar.
+HEALTH_BAR_PRESENCE_DENSITY = 0.3
+
+# The bar must show zero fill, OR disappear outright, for this many
+# CONSECUTIVE seconds before a kill is confirmed -- same debounce
+# rationale as ABSENCE_CONFIRM_SECONDS. Whether TLOPO actually drains the
+# bar to empty and holds it, or removes the bar entirely, once a boss
+# dies is unconfirmed, so both are watched; a single flickering frame
+# during the death animation shouldn't be enough on its own to avoid
+# double-counting if the bar reappears a moment later (e.g. a multi-phase
+# boss).
+HEALTH_DEFEATED_CONFIRM_SECONDS = 1.0
+
+# The boss nameplate ("Name LV##") sits directly ABOVE the health bar,
+# same cluster as the circular emblem icon to its left (confirmed from
+# real screenshots -- see GitHub issue #7). These pad outward from the
+# detected bar's box to build the OCR crop: generous upward padding
+# since the name row is roughly as tall as the bar itself, a small
+# rightward pad to still catch a name that runs past the bar's right
+# edge, and a larger leftward pad since the emblem icon (not part of the
+# name text) sits in that gap and just gets OCR'd as empty/junk.
+NAMEPLATE_CROP_UP_FACTOR = 2.2
+NAMEPLATE_CROP_LEFT_FACTOR = 1.5
+NAMEPLATE_CROP_RIGHT_FACTOR = 1.0
+
 
 @dataclass
 class DetectorSettings:
@@ -226,11 +359,27 @@ class LootDetector:
         on_status_change: Callable[[str], None],
         on_error: Callable[[str], None],
         settings: Optional[DetectorSettings] = None,
+        on_kill_detected: Optional[Callable[[], None]] = None,
+        on_target_detected: Optional[Callable[[str], None]] = None,
     ):
         self.on_chest_detected = on_chest_detected
         self.on_status_change = on_status_change
         self.on_error = on_error
         self.settings = settings or DetectorSettings()
+        # Fired when the boss health bar tracker confirms a kill (see
+        # _scan_health_bar/_confirm_kill). Kept as a separate callback
+        # from on_chest_detected -- and expected to be logged/tagged
+        # separately on the session side, e.g. Session.add_auto_kill --
+        # since this is a heuristic detection, not a certainty, and
+        # miscounts need to stay easy to spot against manually-clicked
+        # kills.
+        self.on_kill_detected = on_kill_detected
+        # Fired once per fresh encounter (the moment the health bar first
+        # appears) with the canonical, correctly-spelled boss name -- see
+        # _detect_boss_name -- so the GUI can auto-set the active target.
+        # The GUI is still expected to let the player override this
+        # manually at any time (see GitHub issue #7's auto-target design).
+        self.on_target_detected = on_target_detected
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -272,6 +421,21 @@ class LootDetector:
 
         self.active_target_getter: Optional[Callable[[], str]] = None
         self.kill_number_getter: Optional[Callable[[], int]] = None
+
+        # Boss health bar tracking state (see _scan_health_bar). Plain
+        # scalars, not per-window dicts -- this branch only ever tracks
+        # the one TLOPO window, so there's no need for the window-keyed
+        # state the multi-window branches use for the same feature.
+        self._health_bar_present: bool = False
+        self._health_bar_box: Optional[Tuple[int, int, int, int]] = None
+        self._health_zero_since: Optional[float] = None
+        self._health_absent_since: Optional[float] = None
+        # Rate-limits the expensive OCR-driven candidate match in
+        # _scan_health_bar to at most once every
+        # HEALTH_CANDIDATE_OCR_INTERVAL_S while no boss is being tracked
+        # -- see that constant's docstring for why (GitHub issue #9).
+        self._last_boss_candidate_ocr_at: float = 0.0
+        self._last_health_debug_at: float = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -434,11 +598,17 @@ class LootDetector:
     # ------------------------------------------------------------------
     def _scan_once(self, sct, monitor):
         now = time.time()
-        if now < self._cooldown_until:
-            return
-
         shot = sct.grab(monitor)
         frame = np.array(shot)[:, :, :3][:, :, ::-1]  # BGRA -> RGB
+
+        # Independent of the loot-popup cooldown below -- a kill can
+        # happen with no loot popup open at all (TLOPO has no guaranteed
+        # drop; see GitHub issue #7), so this must never be skipped just
+        # because a chest recently closed nearby.
+        self._scan_health_bar(frame, now)
+
+        if now < self._cooldown_until:
+            return
 
         if self._window_present_last and self._last_known_box is not None:
             # We're already tracking an open window -- use the lenient
@@ -772,6 +942,359 @@ class LootDetector:
         return None
 
     # ------------------------------------------------------------------
+    # Boss health bar detection + kill state machine (see
+    # HEALTH_DEFEATED_CONFIRM_SECONDS and GitHub issue #7)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _health_fill_mask(frame: np.ndarray) -> np.ndarray:
+        diff_g = np.abs(frame.astype(np.int16) - HEALTH_GREEN_RGB.astype(np.int16))
+        diff_y = np.abs(frame.astype(np.int16) - HEALTH_YELLOW_RGB.astype(np.int16))
+        diff_r = np.abs(frame.astype(np.int16) - HEALTH_RED_RGB.astype(np.int16))
+        return (
+            np.all(diff_g <= HEALTH_FILL_TOLERANCE, axis=-1)
+            | np.all(diff_y <= HEALTH_FILL_TOLERANCE, axis=-1)
+            | np.all(diff_r <= HEALTH_FILL_TOLERANCE, axis=-1)
+        )
+
+    @staticmethod
+    def _health_track_mask(frame: np.ndarray) -> np.ndarray:
+        diff = np.abs(frame.astype(np.int16) - HEALTH_TRACK_RGB.astype(np.int16))
+        return np.all(diff <= HEALTH_TRACK_TOLERANCE, axis=-1)
+
+    @staticmethod
+    def _extend_track_right(track_mask: np.ndarray, x1: int, x2: int, y1: int, y2: int, w: int) -> int:
+        """
+        A connected-component search on the FILL colors only (see
+        _find_health_bar_candidates) gives the bounding box of just the
+        filled portion of the bar, not the whole bar -- the drained
+        track to its right isn't part of that blob. This walks column-
+        by-column rightward from the fill's own right edge, counting a
+        column as still "bar" while at least half its pixels (within the
+        fill blob's own row range) match the track color, stopping once
+        a few consecutive columns miss -- i.e. treating the bar as a
+        fixed-height horizontal strip and following it, rather than a
+        connected-component search over the track color (which merges
+        into the huge, unrelated near-black area covering most of a
+        real game screen -- shadows, dark clothing, water, other UI --
+        and reliably fails to find the actual bar). Capped at a bounded
+        multiple of the fill blob's own width so a stray dark patch
+        abutting the fill's edge can't run away unbounded.
+        """
+        bar_h = max(1, y2 - y1)
+        fill_w = max(1, x2 - x1)
+        max_x = min(w, x2 + int(fill_w * HEALTH_TRACK_EXTEND_MAX_FACTOR))
+        col = x2
+        gap = 0
+        while col < max_x:
+            if int(track_mask[y1:y2, col].sum()) >= 0.5 * bar_h:
+                gap = 0
+            else:
+                gap += 1
+                if gap > 3:
+                    return col - gap + 1
+            col += 1
+        return col
+
+    @staticmethod
+    def _expand_bar_rows(
+        fill_mask: np.ndarray, track_mask: np.ndarray, x1: int, x2: int, y1: int, y2: int, h: int
+    ) -> Tuple[int, int]:
+        """
+        The fill-only connected component's y-range can be a couple of
+        pixels SHORTER than the bar's true height -- anti-aliased top/
+        bottom edge pixels often fall just outside the fill color
+        tolerance. Walks up/down from that y-range, within the already-
+        known column range, counting a row as still "bar" while at
+        least half its pixels (fill OR track) match, to recover the true
+        height. This matters because the returned box is also used to
+        size the nameplate OCR crop above the bar (see
+        NAMEPLATE_CROP_UP_FACTOR) -- an undersized bar_h there shrinks
+        that crop enough to miss the name text entirely, even though
+        fill-fraction detection itself still works fine on the tighter
+        box.
+
+        Capped at a bounded multiple of the original fill blob's own
+        height, same rationale as _extend_track_right's width cap --
+        without it, a uniformly dark surrounding area (e.g. a shadowed
+        corridor) can satisfy the "half the row matches" check far past
+        the bar's real edges and inflate the box to cover a huge, wrong
+        chunk of the screen.
+        """
+        combined = fill_mask | track_mask
+        bar_w = max(1, x2 - x1)
+        orig_h = max(1, y2 - y1)
+        max_expand = int(orig_h * HEALTH_BAR_ROW_EXPAND_MAX_FACTOR)
+
+        top = y1
+        row, gap = y1, 0
+        while row > max(0, y1 - max_expand):
+            row -= 1
+            if int(combined[row, x1:x2].sum()) >= 0.5 * bar_w:
+                top, gap = row, 0
+            else:
+                gap += 1
+                if gap > 2:
+                    break
+
+        bottom = y2
+        row, gap = y2, 0
+        while row < min(h - 1, y2 + max_expand):
+            row += 1
+            if int(combined[row, x1:x2].sum()) >= 0.5 * bar_w:
+                bottom, gap = row, 0
+            else:
+                gap += 1
+                if gap > 2:
+                    break
+
+        return top, bottom
+
+    def _find_health_bar_candidates(
+        self, frame: np.ndarray, fill_mask: np.ndarray, track_mask: np.ndarray
+    ) -> List[Tuple[Tuple[int, int, int, int], float]]:
+        """
+        Scan for wide-strip, health-bar-shaped blobs via connected-
+        component labeling over the FILL-color mask only (green/yellow/
+        red), NOT combined with the track mask -- those colors are
+        comparatively rare across a whole game screen, same reasoning
+        _find_loot_window relies on for the parchment tan. The track's
+        near-black is the opposite: it's everywhere on a real screen
+        (shadows, dark clothing, water, UI chrome), so a combined-mask
+        search reliably merges the bar into one huge, wrong-shaped blob
+        and never finds it. Once a fill blob is found,
+        _extend_track_right walks rightward along that row only to find
+        where the bar's drained portion actually ends.
+
+        Returns up to HEALTH_BAR_MAX_CANDIDATES (box, fill_fraction)
+        pairs, largest first, rather than just the single biggest blob --
+        the player's own always-visible HUD health bar (same colors,
+        same shape) can be BIGGER than the boss's own bar on a given
+        poll (e.g. while the boss is below full health but the player is
+        still topped up). Returning only the largest one would mean the
+        real boss bar gets silently skipped on any poll where a non-boss
+        bar out-sizes it. The caller (_scan_health_bar) tries each
+        candidate's nameplate in turn until one matches a known boss
+        name.
+        """
+        h, w = frame.shape[0], frame.shape[1]
+        candidates: List[Tuple[Tuple[int, int, int, int], float]] = []
+
+        total_matching = int(fill_mask.sum())
+        min_required = HEALTH_BAR_MIN_REGION_FRACTION * h * w
+        if total_matching < min_required:
+            return candidates
+
+        try:
+            from scipy import ndimage
+        except Exception as e:
+            self.on_error(f"scipy is required for detection but failed to load: {e}")
+            return candidates
+
+        labeled, num_features = ndimage.label(fill_mask)
+        if num_features == 0:
+            return candidates
+
+        sizes = ndimage.sum(fill_mask, labeled, index=range(1, num_features + 1))
+        order = np.argsort(sizes)[::-1]  # largest component first
+
+        for idx in order:
+            size = sizes[idx]
+            if size < min_required:
+                break  # sorted descending -- everything after this is smaller too
+
+            comp_id = idx + 1
+            ys, xs = np.where(labeled == comp_id)
+            y1, y2 = int(ys.min()), int(ys.max())
+            x1, x2 = int(xs.min()), int(xs.max())
+
+            box_w, box_h = max(1, x2 - x1), max(1, y2 - y1)
+            if box_w / box_h < HEALTH_BAR_MIN_ASPECT_RATIO:
+                continue  # not a wide strip -- some other colored blob (chat text, combat numbers, etc.)
+
+            full_x2 = self._extend_track_right(track_mask, x1, x2, y1, y2, w)
+            full_y1, full_y2 = self._expand_bar_rows(fill_mask, track_mask, x1, full_x2, y1, y2, h)
+            fill_count = int(fill_mask[full_y1:full_y2, x1:full_x2].sum())
+            track_count = int(track_mask[full_y1:full_y2, x1:full_x2].sum())
+            denom = fill_count + track_count
+            if denom == 0:
+                continue
+            candidates.append(((x1, full_y1, full_x2, full_y2), fill_count / denom))
+            if len(candidates) >= HEALTH_BAR_MAX_CANDIDATES:
+                break
+
+        return candidates
+
+    def _health_bar_density(self, fill_mask: np.ndarray, track_mask: np.ndarray, box) -> Tuple[bool, float]:
+        """
+        Lenient check used ONLY while a bar is already being tracked, at
+        a fixed box (the nameplate/bar cluster is a fixed HUD element,
+        not one that moves frame to frame): is there still enough
+        combined fill+track coverage in that exact spot to say the bar
+        element is still genuinely on screen? This is deliberately NOT a
+        fresh connected-component search (see _find_health_bar_
+        candidates) -- it just recomputes fill/track pixel counts within
+        the box already known to be the bar. Returns (still_present,
+        fill_fraction).
+        """
+        x1, y1, x2, y2 = box
+        h, w = fill_mask.shape[0], fill_mask.shape[1]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        if x2 <= x1 or y2 <= y1:
+            return False, 0.0
+        fill_count = int(fill_mask[y1:y2, x1:x2].sum())
+        track_count = int(track_mask[y1:y2, x1:x2].sum())
+        denom = fill_count + track_count
+        box_area = max(1, (y2 - y1) * (x2 - x1))
+        if denom / box_area < HEALTH_BAR_PRESENCE_DENSITY:
+            return False, 0.0
+        return True, (fill_count / denom if denom else 0.0)
+
+    def _scan_health_bar(self, frame: np.ndarray, now: float) -> None:
+        """
+        Independent boss-health tracker, run every poll regardless of
+        the loot-popup cooldown/session state (a kill can happen with no
+        loot popup ever appearing -- TLOPO has no guaranteed drop).
+        Confirms a kill via on_kill_detected() once the tracked bar's
+        fill hits zero, OR the bar disappears outright, and holds for
+        HEALTH_DEFEATED_CONFIRM_SECONDS -- see that constant's docstring
+        for why both conditions are watched.
+        """
+        fill_mask = self._health_fill_mask(frame)
+        track_mask = self._health_track_mask(frame)
+
+        if self._health_bar_present:
+            present, fraction = (
+                self._health_bar_density(fill_mask, track_mask, self._health_bar_box)
+                if self._health_bar_box is not None else (False, 0.0)
+            )
+
+            if not present:
+                if self._health_absent_since is None:
+                    self._health_absent_since = now
+                elif now - self._health_absent_since >= HEALTH_DEFEATED_CONFIRM_SECONDS:
+                    self._confirm_kill(reason="bar disappeared")
+                return
+            self._health_absent_since = None
+
+            if fraction <= 0.0:
+                if self._health_zero_since is None:
+                    self._health_zero_since = now
+                elif now - self._health_zero_since >= HEALTH_DEFEATED_CONFIRM_SECONDS:
+                    self._confirm_kill(reason="fill hit zero")
+                return
+            self._health_zero_since = None
+            return
+
+        # Not currently tracking a bar. The cheap fill-pixel-count check
+        # runs every poll regardless, but the expensive OCR-driven
+        # candidate match below is throttled to at most once every
+        # HEALTH_CANDIDATE_OCR_INTERVAL_S -- running it every single poll
+        # for every candidate that never matches a known boss (the
+        # player's own HUD bar, nearby crew members' bars, which are on
+        # screen almost constantly) was a real, confirmed regression:
+        # noticeably slower OCR overall and constant console spam
+        # (GitHub issue #9).
+        if now - self._last_boss_candidate_ocr_at < HEALTH_CANDIDATE_OCR_INTERVAL_S:
+            return
+        self._last_boss_candidate_ocr_at = now
+
+        candidates = self._find_health_bar_candidates(frame, fill_mask, track_mask)
+        if not candidates:
+            # TEMPORARY diagnostic -- rate-limited since this can still
+            # run somewhat often; reports the raw fill-color pixel count
+            # found anywhere on screen so a near-miss (right ballpark,
+            # just under MIN_REGION_FRACTION or filtered by aspect
+            # ratio) can be told apart from a true zero (wrong RGB/
+            # tolerance entirely, or the capture isn't seeing that part
+            # of the screen at all).
+            if now - self._last_health_debug_at >= 2.0:
+                self._last_health_debug_at = now
+                print(f"[TLOPO detect] health-bar scan: {int(fill_mask.sum())} fill-color "
+                      f"px on screen (need >= {int(HEALTH_BAR_MIN_REGION_FRACTION * frame.shape[0] * frame.shape[1])})",
+                      flush=True)
+            return
+
+        # Try each size-ranked candidate (largest first) until one's
+        # nameplate actually matches a known boss -- required before
+        # committing to track (and eventually count a kill against) it.
+        # The player's own always-visible HUD health bar, and nearby
+        # crew members' floating bars -- same wide-strip shape, same
+        # color scheme, just a different size -- also clear the shape/
+        # size filters, and can out-size the boss's own (possibly
+        # already-damaged) bar on a given poll. Without both this loop
+        # AND the name-match requirement, the real boss bar could be
+        # silently skipped, or worse, tracking a false one could
+        # eventually fire a false kill once IT disappears (an ally walks
+        # off-screen, not died).
+        for box, fraction in candidates:
+            if fraction <= 0.0:
+                continue
+            name = self._detect_boss_name(frame, box)
+            if name is None:
+                print(f"[TLOPO detect] health-bar candidate at {box} (fill={fraction:.2f}) "
+                      f"found but nameplate did not match a known boss -- not tracking", flush=True)
+                continue
+
+            self._health_bar_present = True
+            self._health_bar_box = box
+            self._health_zero_since = None
+            self._health_absent_since = None
+            if self.on_target_detected:
+                self.on_target_detected(name)
+            return
+
+    def _confirm_kill(self, reason: str) -> None:
+        print(f"[TLOPO detect] boss health bar kill confirmed ({reason})", flush=True)
+        self._health_bar_present = False
+        self._health_bar_box = None
+        self._health_zero_since = None
+        self._health_absent_since = None
+        if self.on_kill_detected:
+            self.on_kill_detected()
+
+    def _detect_boss_name(self, frame: np.ndarray, bar_box: Tuple[int, int, int, int]) -> Optional[str]:
+        """
+        OCRs the nameplate directly above a freshly-detected health bar
+        and fuzzy-matches it against the known boss list (see
+        loot_parser.match_known_boss_name), returning the canonical
+        correctly-spelled name, or None if OCR found nothing or the
+        text didn't match closely enough to trust.
+        """
+        if self._ocr_reader is None:
+            return None
+
+        h, w = frame.shape[0], frame.shape[1]
+        x1, y1, x2, y2 = bar_box
+        bar_h = max(1, y2 - y1)
+
+        ny1 = max(0, y1 - int(bar_h * NAMEPLATE_CROP_UP_FACTOR))
+        ny2 = y1
+        nx1 = max(0, x1 - int(bar_h * NAMEPLATE_CROP_LEFT_FACTOR))
+        nx2 = min(w, x2 + int(bar_h * NAMEPLATE_CROP_RIGHT_FACTOR))
+        if ny2 <= ny1 or nx2 <= nx1:
+            return None
+
+        crop = frame[ny1:ny2, nx1:nx2]
+        lines = self._ocr_lines_with_boxes(crop)
+        if not lines:
+            return None
+
+        # The level ("LV##") usually reads as its own separate line/box
+        # next to the name (occasionally merged onto the same line, e.g.
+        # "Remington the Vicious Lv28") -- strip it out either way before
+        # matching, same pattern NAMEPLATE_LEVEL_RE is used for elsewhere.
+        text = " ".join(
+            NAMEPLATE_LEVEL_RE.sub("", t).strip() for t, _ in lines
+        ).strip()
+        name = match_known_boss_name(text)
+        if name:
+            print(f"[TLOPO detect] nameplate OCR {text!r} matched known boss {name!r}", flush=True)
+        else:
+            print(f"[TLOPO detect] nameplate OCR {text!r} did not match any known boss", flush=True)
+        return name
+
+    # ------------------------------------------------------------------
     # OCR + rarity classification of a detected window
     # ------------------------------------------------------------------
     def _read_loot_window(self, frame: np.ndarray, region) -> Optional[ChestResult]:
@@ -886,6 +1409,7 @@ class LootDetector:
 
         gold = self._extract_gold(gold_label_boxes, numeric_lines)
 
+        name_candidates = self._strip_nameplate_lines(name_candidates)
         name_candidates = self._merge_wrapped_item_lines(name_candidates)
 
         items: List[LootItem] = []
@@ -989,6 +1513,58 @@ class LootDetector:
     def _box_center(box: tuple) -> Tuple[float, float]:
         x1, y1, x2, y2 = box
         return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+    @staticmethod
+    def _strip_nameplate_lines(candidates: List[Tuple[str, tuple]]) -> List[Tuple[str, tuple]]:
+        """
+        Nearby players render a floating two-line nameplate over the game
+        world: "Name LV##" on top, and their crew name in caps directly
+        underneath (e.g. "Fireskull LV50" / "DARK ARCHIVE", "Zion LV50" /
+        "ALCHEMIST" -- confirmed via a live reference screenshot). If a
+        player is standing close enough when a loot popup opens, this
+        floating text falls inside the popup's captured region and both
+        lines get OCR'd as bogus untagged items.
+
+        The "Name LV##" line is caught by NAMEPLATE_LEVEL_RE. The crew-tag
+        line below it has no pattern of its own to match against, so it's
+        dropped by proximity to a matched level line instead -- both a
+        tight vertical gap (the same heuristic _merge_wrapped_item_lines
+        uses to detect a stacked pair, just used here to discard rather
+        than merge) AND horizontal overlap. The horizontal check matters:
+        without it, a real item sitting anywhere in the popup's item grid
+        at roughly the same row height as the nameplate bleed -- but in a
+        completely different column -- would get wrongly stripped too,
+        since a floating nameplate's two lines are narrow and roughly
+        centered on the same spot, not spread across the whole row.
+        """
+        anchors = [box for text, box in candidates if NAMEPLATE_LEVEL_RE.search(text)]
+        if not anchors:
+            return candidates
+
+        def near_anchor(box: tuple) -> bool:
+            bx1, by1, bx2, by2 = box
+            for ax1, ay1, ax2, ay2 in anchors:
+                anchor_h = ay2 - ay1
+                gap = max(ay1 - by2, by1 - ay2, 0)
+                if gap > max(8, anchor_h * 0.6):
+                    continue
+                x_overlap = min(bx2, ax2) - max(bx1, ax1)
+                if x_overlap > 0:
+                    return True
+            return False
+
+        kept = []
+        for text, box in candidates:
+            if NAMEPLATE_LEVEL_RE.search(text):
+                print(f"[TLOPO detect] candidate {text!r} skipped: matches "
+                      f"nameplate 'Name LV##' pattern", flush=True)
+                continue
+            if near_anchor(box):
+                print(f"[TLOPO detect] candidate {text!r} skipped: adjacent "
+                      f"to nameplate level line (likely a crew tag)", flush=True)
+                continue
+            kept.append((text, box))
+        return kept
 
     @staticmethod
     def _merge_wrapped_item_lines(
