@@ -20,8 +20,10 @@ All builds are on the [**Releases**](../../releases) page, distinguishable by th
 - **Reads item rarity by text color** (Common, Uncommon, Rare, Famed, Legendary) using OCR and color analysis.
 - **Tracks every Famed and Legendary item by name**, with a running count of how many of each you've gotten, visible at all times.
 - **Per-target session stats**: kills (manual +1/+5/+10 buttons), pouch/chest/skull chest counts, and skull-chest drop rate — tracked separately for each boss/enemy you farm, plus combined session totals.
+- **Auto-detects boss kills and your farming target** for a growing list of named bosses, by watching the boss's on-screen health bar and nameplate — no need to click +1 or change the target dropdown yourself. Auto-detected kills are shown alongside your manual count (e.g. `12 (9 auto)`) so you can compare the two. **Caveats:** this only works for named bosses on the tracker's known list one-on-one — it does **not** yet work for common/regular enemies, and does **not** work well when killing a whole group of enemies at once (e.g. farming the Bridge or the Hornets), where you should keep using the manual kill buttons. Support for all enemy types is planned for a future release.
 - **Exports your session** to a formatted Excel workbook (3 sheets: summary, named item log, full loot log) or a plain text file, saved straight to your Desktop.
-- **Runs alongside the game**, always-on-top, and never touches game files or the network — it only reads what's on your screen. On Windows, detection is scoped to just the TLOPO game window itself while it's focused, so other things on your screen (Discord, a browser, etc.) can't be mistaken for the game.
+- **Runs alongside the game**, always-on-top, and never touches game files — it only reads what's on your screen. On Windows, detection is scoped to just the TLOPO game window itself while it's focused, so other things on your screen (Discord, a browser, etc.) can't be mistaken for the game.
+- **Optional, opt-in anonymized data sharing** to help estimate real drop rates for a community wiki — off by default, no player/character/account info ever included. See "Community Drop-Rate Data Sharing" below.
 
 ## Download
 
@@ -46,6 +48,12 @@ Windows 11, Python 3.10+ (the installer will tell you if it's missing and where 
 **Known limitation (all platforms, including Windows)**: window-scoping only helps once the game window is *focused*. Something drawn on top of the game *without* stealing focus — most notably Discord's own in-game overlay feature — can still be misread, since the tracker can't currently distinguish "the game is focused" from "something is visually on top of the focused game." Avoid bringing up overlay content with loot screenshots while farming.
 
 **Known issue**: item names that wrap across two lines in the loot popup don't always get merged back into a single item — occasionally you'll see one item logged as two separate half-name entries. Less commonly, a green (Rare) item can be logged as untagged instead of "Rare" near the edge of the expected color range. Gold amounts and chest counts are unaffected either way. Tracked in [Issue #5](../../issues/5).
+
+## Community Drop-Rate Data Sharing (Opt-In)
+
+The tracker can optionally send an anonymized record of each chest you loot to a community backend, to help estimate real drop rates for a loot wiki. This is **off by default** and requires both checking a box and entering an endpoint URL in **Settings**.
+
+What's sent, if you turn this on: the target/boss name, chest type, item names + rarities, gold amount, and your kill/skull-chest count at the time of the drop. What's **never** sent: your player name, character name, account info, or anything else that could identify you -- only a random ID generated once for your install, so the backend can tell repeated submissions from the same install apart from independent ones in aggregate, without knowing who you are. See [`loot_wiki_backend/`](loot_wiki_backend) for the server-side code and exact schema.
 
 ## If detection doesn't work on your setup
 

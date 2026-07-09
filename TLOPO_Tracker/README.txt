@@ -137,6 +137,41 @@ screen automatically and logs each chest the moment it appears,
 including the gold amount and every item's rarity.
 
 
+4B. AUTOMATIC KILL & TARGET DETECTION (NAMED BOSSES ONLY)
+------------------------------------------------------------------
+For a growing list of named bosses, the tracker can now do steps 3 and
+4 above for you automatically:
+
+  - The moment you engage a recognized boss, the tracker reads its
+    on-screen nameplate and switches your "Current Target" to match -
+    no need to pick it from the dropdown yourself.
+  - When that boss's health bar empties or disappears, the tracker
+    automatically counts a kill. Auto-detected kills are shown right
+    alongside your manual count, like "12 (9 auto)", so you can always
+    compare the two and spot anything that looks off.
+
+You can still set your target manually and click +1/+5/+10 at any
+time - manual actions always work exactly as before, and a manual
+target pick just stays in effect until the next auto-detected
+encounter starts.
+
+IMPORTANT - PLEASE READ BEFORE RELYING ON THIS:
+  - This ONLY works for BOSSES on the tracker's known-name list right
+    now, fought one-on-one. Common/regular enemies are NOT
+    auto-detected yet - you still need to click +1 (or +5/+10)
+    manually for those. Support for all enemy types is planned for a
+    future release.
+  - This does NOT work well when you're killing a whole GROUP of
+    enemies at once - for example farming the Bridge or the Hornets,
+    where several enemies (and health bars) are on screen and dying
+    together. Use the manual kill buttons for fights like those, the
+    same as before.
+  - If an auto-detected kill count ever looks off for a boss fight,
+    compare it against the "(N auto)" number shown next to your Kills
+    counter, and fall back to manual +1 clicks for the rest of that
+    fight if needed.
+
+
 5. FAMED AND LEGENDARY DROPS
 ------------------------------
 These are the rare, important items. Any time one drops, the tracker
@@ -155,6 +190,33 @@ called "TLOPO_Tracker_Exports". The Excel file has a page for your
 overall totals, a page listing every named Famed/Legendary item you
 found, and a page listing every single item from every chest. The
 text file has the same information in plain, readable text.
+
+
+6B. COMMUNITY DROP-RATE DATA SHARING (OPTIONAL, OFF BY DEFAULT)
+------------------------------------------------------------------
+The tracker can optionally send an anonymized record of each chest you
+loot to a community backend, to help estimate real drop rates for a
+loot wiki. This is turned OFF by default and requires you to both
+check a box AND type in an endpoint address before anything is ever
+sent.
+
+To turn it on: open Settings (gear icon), scroll to "Community
+Drop-Rate Data Sharing", check "Share anonymized loot data", and enter
+the endpoint address (given to you by whoever runs the backend you
+want to contribute to). Leave the box unchecked, or the address blank,
+and nothing is ever sent - the tracker works exactly the same either
+way.
+
+What gets sent, if you turn this on: the target/boss name, chest type
+(pouch/chest/skull), item names and rarities, gold amount, and your
+kill/skull-chest count at the time of that specific drop.
+
+What is NEVER sent: your player name, character name, account info, or
+anything else that could identify you. The only thing tagging your
+submissions is a random ID generated once when you first turn this on,
+stored only on your own computer - it lets the receiving end tell
+repeated submissions from your install apart from everyone else's in
+aggregate, without ever knowing who you are.
 
 
 7. SWITCHING TO A NEW TARGET

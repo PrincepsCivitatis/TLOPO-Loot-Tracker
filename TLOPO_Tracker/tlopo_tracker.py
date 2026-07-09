@@ -33,6 +33,7 @@ from loot_parser import (
 from session import Session
 from exporter import export_to_excel, export_to_text, default_export_folder
 from detector import LootDetector, DetectorSettings, DEFAULT_PARCHMENT_RGB, DEFAULT_PARCHMENT_TOLERANCE
+from loot_wiki_client import ensure_anon_id, submit_chest_async
 
 APP_TITLE = "TLOPO Loot Tracker"
 WINDOW_W, WINDOW_H = 440, 750
@@ -113,6 +114,12 @@ class TLOPOTrackerApp:
 
         self.app_dir = os.path.dirname(os.path.abspath(__file__))
         self.settings = self._load_settings()
+        # target -> kill count as of the last loot-wiki submission for it
+        # (see _maybe_submit_to_loot_wiki). In-memory/session-scoped only,
+        # not persisted -- worst case after a restart is one slightly
+        # oversized delta on the next chest for a target, not a
+        # correctness problem for aggregate rates.
+        self._loot_wiki_kill_baseline = {}
 
         self.detector: LootDetector = None
         self._detector_started = False
@@ -180,6 +187,14 @@ class TLOPOTrackerApp:
             "parchment_rgb": list(DEFAULT_PARCHMENT_RGB),
             "parchment_tolerance": DEFAULT_PARCHMENT_TOLERANCE,
             "export_folder": default_export_folder(),
+            # Opt-in, anonymized loot-data sharing for community drop-rate
+            # research -- off unless the user explicitly turns it on AND
+            # sets an endpoint in Settings. loot_wiki_anon_id is a random
+            # UUID generated on first opt-in (see loot_wiki_client.
+            # ensure_anon_id), never tied to a name/account.
+            "loot_wiki_opt_in": False,
+            "loot_wiki_endpoint": "",
+            "loot_wiki_anon_id": "",
         }
         path = self._settings_path()
         if os.path.exists(path):
@@ -560,10 +575,61 @@ class TLOPOTrackerApp:
         self._append_loot_log_row(result)
         self._flash_ui()
         self._refresh_all()
+        self._maybe_submit_to_loot_wiki(result)
 
         for item in named_hits:
             if item.rarity == "Legendary":
                 self._show_legendary_alert(item.name)
+
+    def _maybe_submit_to_loot_wiki(self, result: ChestResult):
+        """
+        Fires an anonymized loot-wiki submission for this chest if the
+        user has opted in and set an endpoint (see Settings). Only the
+        initial/provisional log triggers a submission, not a later
+        amendment for the same chest (see _handle_chest_amended) -- an
+        amendment is late-arriving content for a chest ALREADY counted
+        here, and submitting it again would inflate the wiki's chest
+        count for this target without a matching second real chest.
+
+        Submits kills SINCE THE LAST container for this target (a
+        delta), not the session's cumulative kill count -- see
+        loot_wiki_client.submit_chest_async's docstring for why a
+        cumulative count doesn't aggregate correctly across many
+        contributors' sessions. self._loot_wiki_kill_baseline tracks
+        the kill count as of the last submission, per target, so this
+        can compute that delta locally.
+
+        Also tags whether this target's kills are coming from the
+        reliable auto-detector or from manual +1/+5/+10 clicks (see
+        loot_wiki_client.submit_chest_async's docstring on
+        `kill_tracking` -- undercounted manual kills silently inflate
+        every drop rate, since kills are the denominator).
+        """
+        if not self.settings.get("loot_wiki_opt_in"):
+            return
+        endpoint = self.settings.get("loot_wiki_endpoint", "").strip()
+        if not endpoint:
+            return
+
+        anon_id = ensure_anon_id(self.settings)
+        stats = self.session.get_active_stats()
+        current_kills = stats.kills if stats else 0
+        baseline = self._loot_wiki_kill_baseline.get(result.target, 0)
+        kills_since_last = max(0, current_kills - baseline)
+        self._loot_wiki_kill_baseline[result.target] = current_kills
+        kill_tracking = "auto" if (stats and stats.auto_kills > 0) else "manual"
+
+        submit_chest_async(
+            endpoint=endpoint,
+            anon_id=anon_id,
+            target=result.target,
+            chest_type=result.chest_key(),
+            items=[{"name": i.name, "rarity": i.rarity} for i in result.items],
+            gold=result.gold,
+            kills_since_last_container=kills_since_last,
+            skull_chest_number=stats.skull_chests if stats else None,
+            kill_tracking=kill_tracking,
+        )
 
     def _handle_auto_kill_detected(self):
         """
@@ -899,6 +965,23 @@ class TLOPOTrackerApp:
         folder_var = StringVar(value=self.settings.get("export_folder", default_export_folder()))
         Entry(parent, textvariable=folder_var, width=48).pack(padx=10, pady=(0, 16))
 
+        Label(parent, text="Community Drop-Rate Data Sharing (Opt-In)", bg=BG, fg=FG,
+              font=("Segoe UI", 9, "bold")).pack(anchor=W, padx=10, pady=(4, 2))
+        Label(parent, text="Off by default. If enabled, every chest you loot sends an\n"
+                            "anonymized record (target, chest type, items + rarity, gold,\n"
+                            "and your kill/skull-chest count at the time) to the endpoint\n"
+                            "below, to help estimate real drop rates. No player, character,\n"
+                            "or account info is ever sent -- only a random ID generated once\n"
+                            "for this install, so submissions can be told apart in aggregate\n"
+                            "without identifying you. Leave the endpoint blank to keep this\n"
+                            "fully off even if checked.",
+              bg=BG, fg=GREY, justify=LEFT, font=("Segoe UI", 8)).pack(anchor=W, padx=10)
+        loot_wiki_opt_in_var = BooleanVar(value=self.settings.get("loot_wiki_opt_in", False))
+        Checkbutton(parent, text="Share anonymized loot data", variable=loot_wiki_opt_in_var,
+                    bg=BG, fg=FG, selectcolor=PANEL_BG, activebackground=BG).pack(anchor=W, padx=10, pady=(4, 0))
+        loot_wiki_endpoint_var = StringVar(value=self.settings.get("loot_wiki_endpoint", ""))
+        Entry(parent, textvariable=loot_wiki_endpoint_var, width=48).pack(padx=10, pady=(2, 16))
+
         def save_and_close():
             try:
                 poll_ms = int(poll_var.get().strip())
@@ -935,6 +1018,10 @@ class TLOPOTrackerApp:
             self.settings["hide_crude"] = hide_crude_var.get()
             self.settings["hide_common"] = hide_common_var.get()
             self.settings["export_folder"] = folder_var.get().strip() or default_export_folder()
+            self.settings["loot_wiki_opt_in"] = loot_wiki_opt_in_var.get()
+            self.settings["loot_wiki_endpoint"] = loot_wiki_endpoint_var.get().strip()
+            if self.settings["loot_wiki_opt_in"]:
+                ensure_anon_id(self.settings)
             for rarity in RARITY_ORDER:
                 hsv_targets.setdefault(rarity, {})
                 hsv_targets[rarity]["h"] = hue_vars[rarity].get()
