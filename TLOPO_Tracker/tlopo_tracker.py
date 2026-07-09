@@ -188,12 +188,15 @@ class TLOPOTrackerApp:
             "parchment_tolerance": DEFAULT_PARCHMENT_TOLERANCE,
             "export_folder": default_export_folder(),
             # Opt-in, anonymized loot-data sharing for community drop-rate
-            # research -- off unless the user explicitly turns it on AND
-            # sets an endpoint in Settings. loot_wiki_anon_id is a random
-            # UUID generated on first opt-in (see loot_wiki_client.
-            # ensure_anon_id), never tied to a name/account.
+            # research -- opt_in stays OFF by default (privacy-first: no
+            # data is ever sent without the player explicitly checking the
+            # box themselves), but the endpoint is prefilled with the
+            # project's own hosted backend so turning it on is a single
+            # click, not a URL to track down and type in. loot_wiki_anon_id
+            # is a random UUID generated on first opt-in (see
+            # loot_wiki_client.ensure_anon_id), never tied to a name/account.
             "loot_wiki_opt_in": False,
-            "loot_wiki_endpoint": "",
+            "loot_wiki_endpoint": "http://100.56.135.187:8000",
             "loot_wiki_anon_id": "",
         }
         path = self._settings_path()

@@ -27,9 +27,22 @@ Then open `http://127.0.0.1:8000/` for the search/browse UI, `POST http://127.0.
 
 ## Deploying
 
-This is a plain FastAPI app with a SQLite file for storage -- no external database or other services required. It'll run anywhere that can run a Python process and expose a port: a small VPS, a free-tier host (Render, Railway, Fly.io, etc.), or your own machine if you're comfortable exposing a port. Whatever you pick, run it behind HTTPS (most of the hosts above provide this automatically) since the tracker will be submitting over the network.
+This is a plain FastAPI app with a SQLite file for storage -- no external database or other services required. It'll run anywhere that can run a Python process and expose a port: a small VPS, a free-tier host (Render, Railway, Fly.io, etc.), or your own machine if you're comfortable exposing a port.
 
-Once deployed, put the base URL into the tracker's Settings panel (or `tlopo_tracker_settings.json`'s `loot_wiki_endpoint` key) so it knows where to send submissions.
+Once deployed, put the base URL into the tracker's Settings panel (or `tlopo_tracker_settings.json`'s `loot_wiki_endpoint` key) so it knows where to send submissions. `TLOPO_Tracker/tlopo_tracker.py`'s default settings already prefill this with the live deployment below, so opting in is a single checkbox for anyone running an unmodified build.
+
+### Current live deployment (AWS EC2, free tier)
+
+- **Account**: `039914330303`, region `us-east-1`.
+- **Instance**: `i-09c870b34f96c9941` (`t3.micro`, free-tier eligible), tagged `tlopo-loot-wiki-backend`.
+- **Elastic IP**: `100.56.135.187` (stable -- won't change if the instance stops/restarts). The tracker's default `loot_wiki_endpoint` points at `http://100.56.135.187:8000`.
+- **Security group**: `sg-0f32e1ec292fb32d3` -- port 8000 (the API) open to `0.0.0.0/0` since clients need to reach it; port 22 (SSH) restricted to whatever IP was used to set this up, not open broadly.
+- **Service**: runs as a systemd unit (`/etc/systemd/system/loot-wiki.service`) under `ec2-user`, `Restart=always`, enabled on boot -- survives both crashes and instance reboots. Code lives at `/home/ec2-user/loot_wiki_backend/` on the instance, in its own venv.
+- **SSH key**: `tlopo-loot-wiki` key pair, private half saved locally outside the repo (never commit an SSH private key).
+
+**Known limitation**: this is plain HTTP, not HTTPS. The data itself is already anonymized/non-identifying, so the stakes of on-path interception are low, but it's still not encrypted in transit. Adding TLS (e.g. a Caddy or nginx reverse proxy with Let's Encrypt, or an AWS Application Load Balancer with an ACM certificate) is a reasonable follow-up rather than something this setup did from the start.
+
+**To redeploy after a code change**: `scp` the updated `app.py`/`static/index.html` to `/home/ec2-user/loot_wiki_backend/` on the instance, then `sudo systemctl restart loot-wiki`. If `requirements.txt` changed, also re-run `venv/bin/pip install -r requirements.txt` first.
 
 ## Endpoints
 
