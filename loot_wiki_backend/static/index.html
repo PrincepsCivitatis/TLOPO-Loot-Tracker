@@ -22,8 +22,8 @@
     padding: 24px 16px 64px;
   }
   .wrap { max-width: 900px; margin: 0 auto; }
-  h1 { color: var(--accent); font-size: 1.4rem; margin: 0 0 4px; }
-  .subtitle { color: var(--grey); font-size: 0.85rem; margin: 0 0 20px; }
+  h1 { color: var(--accent); font-size: 1.65rem; margin: 0 0 6px; }
+  .subtitle { color: var(--grey); font-size: 1rem; line-height: 1.5; margin: 0 0 20px; }
   .search-row {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -37,7 +37,7 @@
   .search-label {
     display: block;
     color: var(--grey);
-    font-size: 0.75rem;
+    font-size: 0.875rem;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     margin-bottom: 4px;
@@ -45,7 +45,7 @@
   input[type="text"] {
     width: 100%;
     padding: 10px 12px;
-    font-size: 1rem;
+    font-size: 1.05rem;
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -80,13 +80,13 @@
     margin-bottom: 16px;
   }
   .card h2 {
-    font-size: 1rem;
+    font-size: 1.1rem;
     color: var(--accent);
     margin: 0 0 12px;
   }
   .edit-link {
     float: right;
-    font-size: 0.75rem;
+    font-size: 0.875rem;
     font-weight: normal;
     color: var(--grey);
     text-decoration: none;
@@ -95,19 +95,19 @@
     padding: 2px 6px;
   }
   .edit-link:hover { color: var(--fg); border-color: var(--accent); }
-  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); }
   th { color: var(--grey); font-weight: 600; }
-  /* Matches RARITY_DISPLAY_HEX in loot_parser.py exactly, so an item's
-     color here is the same one the player sees in-game/in-tracker. */
-  .rarity-Legendary { color: #E82020; }
-  .rarity-Famed { color: #2050E8; }
-  .rarity-Rare { color: #20C820; }
+  /* Keeps the tracker's rarity hues, lightened where needed so colored
+     item names remain readable on the wiki's dark panel background. */
+  .rarity-Legendary { color: #ff7373; }
+  .rarity-Famed { color: #7fa2ff; }
+  .rarity-Rare { color: #67db67; }
   .rarity-Common { color: #E8D020; }
   .rarity-Crude { color: #9A9A9A; }
   .empty { color: var(--grey); font-style: italic; }
-  .stat-row { color: var(--grey); font-size: 0.85rem; margin-bottom: 10px; }
-  .status { color: var(--grey); margin-top: 40px; text-align: center; font-size: 0.85rem; }
+  .stat-row { color: var(--grey); font-size: 0.95rem; margin-bottom: 10px; }
+  .status { color: var(--grey); margin-top: 40px; text-align: center; font-size: 0.95rem; }
   .warning {
     background: #4a3418;
     border: 1px solid #a8752a;
@@ -117,7 +117,7 @@
     font-size: 0.85rem;
     margin-bottom: 16px;
   }
-  .tracking-note { color: var(--grey); font-size: 0.8rem; margin-top: 8px; }
+  .tracking-note { color: var(--grey); font-size: 0.9rem; line-height: 1.5; margin-top: 8px; }
   /* Drop-odds bands (OSRS Wiki-style color banding by how rare a drop
      is, NOT the same thing as an item's Crude/Common/Rare/Famed/
      Legendary quality tier above -- a Crude item can still be a rare
@@ -129,7 +129,7 @@
     padding: 2px 8px;
     border-radius: 4px;
     font-weight: 600;
-    font-size: 0.85rem;
+    font-size: 0.9rem;
   }
   .odds-always { background: #7fd8d8; color: #12302f; }
   .odds-common { background: #6fcf6f; color: #123412; }
@@ -158,7 +158,7 @@
   details.misc-details summary {
     cursor: pointer;
     color: var(--grey);
-    font-size: 0.85rem;
+    font-size: 0.9rem;
     user-select: none;
   }
   details.misc-details summary:hover { color: var(--fg); }
