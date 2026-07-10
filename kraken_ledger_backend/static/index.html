@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Kraken's Ledger</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/assets/common.css">
+</head>
+<body>
+<div class="wrap">
+  <h1>Kraken's Ledger</h1>
+  <p class="subtitle">Opt-in research-observation stream from TLOPO_Tracker (main-debug) -- kill/loot linkage, capture quality, and confidence-tiered item reads.</p>
+  <div class="nav-links">
+    <a href="/">Dashboard</a>
+    <a href="/sessions_page">Sessions</a>
+  </div>
+
+  <div id="stats" class="stat-grid"></div>
+
+  <div class="card">
+    <h2>Enemies</h2>
+    <div class="filter-row">
+      <label for="enemy-filter">Filter:</label>
+      <input type="text" id="enemy-filter" placeholder="Search enemy name...">
+    </div>
+    <table id="enemy-table">
+      <thead>
+        <tr>
+          <th class="sortable" data-key="display_name">Enemy</th>
+          <th class="sortable" data-key="kills">Kills</th>
+          <th class="sortable" data-key="kills_with_loot">Kills w/ Loot</th>
+          <th class="sortable" data-key="chests">Chests</th>
+          <th class="sortable" data-key="chests_linked">Chests Linked</th>
+          <th class="sortable" data-key="sessions">Sessions</th>
+          <th class="sortable" data-key="items_recorded">Items</th>
+        </tr>
+      </thead>
+      <tbody id="enemy-rows"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Generate a Report</h2>
+    <p class="subtitle" style="margin-bottom:12px;">Downloads a CSV. Leave a filter on "All" to include everything for that field.</p>
+    <div class="filter-row">
+      <label for="report-scope">Scope</label>
+      <select id="report-scope">
+        <option value="observations">Observations (kills + chests)</option>
+        <option value="items">Items (one row per dropped item)</option>
+      </select>
+      <label for="report-enemy">Enemy</label>
+      <select id="report-enemy"><option value="">All enemies</option></select>
+      <label for="report-event-type">Event type</label>
+      <select id="report-event-type">
+        <option value="">All</option>
+        <option value="kill">Kills only</option>
+        <option value="chest">Chests only</option>
+      </select>
+      <button id="report-download">Download CSV</button>
+    </div>
+  </div>
+
+  <div class="status" id="status">Loading...</div>
+</div>
+
+<script>
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function fmtTs(unixSeconds) {
+  if (!unixSeconds) return "-";
+  return new Date(unixSeconds * 1000).toLocaleString();
+}
+
+let enemies = [];
+let sortKey = "kills";
+let sortDir = -1;
+
+function renderEnemyTable() {
+  const filter = document.getElementById("enemy-filter").value.trim().toLowerCase();
+  const rows = enemies
+    .filter((e) => !filter || e.display_name.toLowerCase().includes(filter))
+    .sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
+
+  document.getElementById("enemy-rows").innerHTML = rows.length
+    ? rows.map((e) => `
+        <tr class="clickable" onclick="window.location.href='/enemy_page/${encodeURIComponent(e.enemy_id)}'">
+          <td>${escapeHtml(e.display_name)}</td>
+          <td>${e.kills}</td>
+          <td>${e.kills_with_loot}</td>
+          <td>${e.chests}</td>
+          <td>${e.chests_linked}</td>
+          <td>${e.sessions}</td>
+          <td>${e.items_recorded}</td>
+        </tr>`).join("")
+    : `<tr><td colspan="7" class="empty">No enemies match "${escapeHtml(filter)}"</td></tr>`;
+
+  document.querySelectorAll("#enemy-table th.sortable").forEach((th) => {
+    th.classList.toggle("sort-active", th.dataset.key === sortKey);
+  });
+}
+
+document.querySelectorAll("#enemy-table th.sortable").forEach((th) => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.key;
+    sortDir = sortKey === key ? -sortDir : (key === "display_name" ? 1 : -1);
+    sortKey = key;
+    renderEnemyTable();
+  });
+});
+document.getElementById("enemy-filter").addEventListener("input", renderEnemyTable);
+
+async function loadStats() {
+  const res = await fetch("/overview");
+  const d = await res.json();
+  const link = d.chest_link_status;
+  const tiles = [
+    ["Sessions", d.total_sessions],
+    ["Installs (anon.)", d.total_installs],
+    ["Kills", d.total_kills],
+    ["Chests", d.total_chests],
+    ["Items", d.total_items],
+    ["Enemies", d.unique_enemies],
+    ["Chests Linked", `<span style="white-space:nowrap">${link.linked} <span class="mono" style="font-size:0.7rem;color:var(--grey)">/ ${link.linked + link.ambiguous + link.unlinked}</span></span>`],
+    ["Data Since", new Date(d.first_received_at * 1000).toLocaleDateString()],
+  ];
+  document.getElementById("stats").innerHTML = tiles
+    .map(([label, value]) => `<div class="stat-tile"><div class="value">${value}</div><div class="label">${label}</div></div>`)
+    .join("");
+  return d;
+}
+
+async function loadEnemies() {
+  const res = await fetch("/enemies");
+  const d = await res.json();
+  enemies = d.enemies || [];
+  renderEnemyTable();
+
+  const sel = document.getElementById("report-enemy");
+  sel.innerHTML = '<option value="">All enemies</option>' +
+    enemies.map((e) => `<option value="${escapeHtml(e.enemy_id)}">${escapeHtml(e.display_name)}</option>`).join("");
+}
+
+document.getElementById("report-download").addEventListener("click", () => {
+  const scope = document.getElementById("report-scope").value;
+  const enemyId = document.getElementById("report-enemy").value;
+  const eventType = document.getElementById("report-event-type").value;
+  const params = new URLSearchParams({ scope });
+  if (enemyId) params.set("enemy_id", enemyId);
+  if (eventType) params.set("event_type", eventType);
+  window.location.href = `/report.csv?${params.toString()}`;
+});
+
+async function init() {
+  try {
+    await loadStats();
+    await loadEnemies();
+    document.getElementById("status").textContent =
+      enemies.length ? `${enemies.length} enemies with data.` : "No data submitted yet.";
+  } catch (e) {
+    document.getElementById("status").textContent = "Failed to load data.";
+  }
+}
+init();
+</script>
+</body>
+</html>

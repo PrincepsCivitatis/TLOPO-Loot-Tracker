@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Kraken's Ledger -- Sessions</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/assets/common.css">
+</head>
+<body>
+<div class="wrap">
+  <h1>Sessions</h1>
+  <p class="subtitle">Every submitted session, newest first. Click a row for its full kill/loot timeline.</p>
+  <div class="nav-links">
+    <a href="/">Dashboard</a>
+    <a href="/sessions_page">Sessions</a>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th>Session ID</th>
+          <th>Install (anon.)</th>
+          <th>Started</th>
+          <th>Last Activity</th>
+          <th>Kills</th>
+          <th>Chests</th>
+          <th>Enemies</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="pager">
+      <button id="prev" class="btn-secondary">&laquo; Prev</button>
+      <span id="page-info" class="mono"></span>
+      <button id="next" class="btn-secondary">Next &raquo;</button>
+    </div>
+  </div>
+
+  <div class="status" id="status">Loading...</div>
+</div>
+
+<script>
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+function fmtTs(unixSeconds) {
+  if (!unixSeconds) return "-";
+  return new Date(unixSeconds * 1000).toLocaleString();
+}
+
+const LIMIT = 50;
+let offset = 0;
+let total = 0;
+
+async function load() {
+  const status = document.getElementById("status");
+  status.textContent = "Loading...";
+  const res = await fetch(`/sessions?limit=${LIMIT}&offset=${offset}`);
+  const d = await res.json();
+  total = d.total;
+
+  document.getElementById("rows").innerHTML = d.sessions.length
+    ? d.sessions.map((s) => `
+        <tr class="clickable" onclick="window.location.href='/session_page/${encodeURIComponent(s.session_id)}'">
+          <td class="mono">${escapeHtml(s.session_id)}</td>
+          <td class="mono">${escapeHtml((s.anon_id || "").slice(0, 8))}</td>
+          <td>${fmtTs(s.session_start)}</td>
+          <td>${fmtTs(s.last_seen_at)}</td>
+          <td>${s.kills}</td>
+          <td>${s.chests}</td>
+          <td>${s.enemies_encountered}</td>
+        </tr>`).join("")
+    : '<tr><td colspan="7" class="empty">No sessions submitted yet</td></tr>';
+
+  const shown = d.sessions.length;
+  document.getElementById("page-info").textContent =
+    total ? `${offset + 1}-${offset + shown} of ${total}` : "0 of 0";
+  document.getElementById("prev").disabled = offset === 0;
+  document.getElementById("next").disabled = offset + LIMIT >= total;
+  status.textContent = "";
+}
+
+document.getElementById("prev").addEventListener("click", () => {
+  offset = Math.max(0, offset - LIMIT);
+  load();
+});
+document.getElementById("next").addEventListener("click", () => {
+  if (offset + LIMIT < total) { offset += LIMIT; load(); }
+});
+
+load();
+</script>
+</body>
+</html>

@@ -49,8 +49,23 @@ Plain FastAPI app with a SQLite file for storage -- no external database or othe
 
 - `POST /submit_batch` -- upsert a session's full observation stream. Rate-limited to 20/minute per IP.
 - `GET /health` -- basic liveness check.
+- `GET /overview` -- site-wide totals (sessions, installs, kills, chests, items, unique enemies, chest link-status breakdown).
+- `GET /enemies` -- one row per enemy with aggregate kill/chest/session/item counts.
+- `GET /enemies/{enemy_id}` -- full breakdown for one enemy: capture-quality distribution, kill<->loot link-status distribution, chest-type breakdown, item rarity distribution, top items with average OCR confidence, confidence-tier breakdown, recent session IDs.
+- `GET /sessions?limit=&offset=` -- paginated session list (newest first).
+- `GET /sessions/{session_id}` -- full kill/loot timeline for one session, items nested per observation.
+- `GET /report.csv?scope=observations|items&enemy_id=&session_id=&event_type=` -- streamed CSV export for either raw observations or item rows joined with their parent observation's context, optionally filtered.
 
-No browse/query endpoints yet (no `/rates`-style analysis surface, unlike `loot_wiki_backend`) -- this is the ingestion pipeline; querying the accumulated data is a natural next step once it's actually flowing, not built ahead of that need.
+## Viewer (`static/`)
+
+Added 2026-07-10 -- Kraken's Ledger was write-only until this point (no way to see submitted data short of querying the SQLite file directly). Same self-contained-static-HTML-calling-fetch() pattern as `loot_wiki_backend/static/`, four pages sharing one stylesheet (`static/common.css`):
+
+- `/` (`index.html`) -- dashboard: overview stat tiles, sortable/filterable enemy table, report-builder form (scope/enemy/event-type filters -> CSV download).
+- `/enemy_page/{enemy_id}` (`enemy.html`) -- everything `GET /enemies/{enemy_id}` returns, plus per-enemy CSV export links and a jump-off list to that enemy's recent sessions.
+- `/sessions_page` (`sessions.html`) -- paginated session browser.
+- `/session_page/{session_id}` (`session.html`) -- full event timeline for one session, plus CSV export links scoped to it.
+
+Static assets are served from `/assets/*` (mounted via `StaticFiles`), kept distinct from the page routes (`/enemy_page/...` etc.) and the JSON API (`/enemies`, `/sessions`, ...) so none of the three route families can collide.
 
 ## Privacy notes
 

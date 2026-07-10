@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Kraken's Ledger -- Session</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/assets/common.css">
+</head>
+<body>
+<div class="wrap">
+  <h1 id="title">Loading...</h1>
+  <p class="subtitle" id="subtitle"></p>
+  <div class="nav-links">
+    <a href="/">Dashboard</a>
+    <a href="/sessions_page">Sessions</a>
+  </div>
+
+  <div id="export"></div>
+
+  <div class="card">
+    <h2>Timeline</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Event</th>
+          <th>Enemy</th>
+          <th>Detail</th>
+          <th>Items</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <div class="status" id="status">Loading...</div>
+</div>
+
+<script>
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+function fmtTs(unixSeconds) {
+  if (!unixSeconds) return "-";
+  return new Date(unixSeconds * 1000).toLocaleString();
+}
+
+function linkClass(status) {
+  return status === "linked" ? "link-linked" : status === "ambiguous" ? "link-ambiguous" : "link-unlinked";
+}
+
+function renderItems(items) {
+  if (!items || !items.length) return '<span class="empty">-</span>';
+  return items
+    .map((i) => `<span class="${i.rarity ? 'rarity-' + i.rarity : ''}">${escapeHtml(i.item_name)}${i.rarity ? ' (' + i.rarity + ')' : ''}</span>`)
+    .join(", ");
+}
+
+function renderDetail(e) {
+  if (e.event_type === "kill") {
+    return `Kill #${e.kill_number ?? "-"} -- <span class="mono">${escapeHtml(e.capture_quality || "unknown")}</span>`;
+  }
+  const linkText = e.linked_kill_observation_id
+    ? `<span class="${linkClass(e.link_status)}">${e.link_status || "linked"}</span>`
+    : `<span class="link-unlinked">unlinked</span>`;
+  const gold = e.gold !== null && e.gold !== undefined ? `, ${e.gold}g` : "";
+  return `${escapeHtml(e.chest_type || "chest")}${gold} -- ${linkText}`;
+}
+
+const sessionId = decodeURIComponent(window.location.pathname.split("/").pop());
+
+async function init() {
+  try {
+    const res = await fetch(`/sessions/${encodeURIComponent(sessionId)}`);
+    if (!res.ok) {
+      document.getElementById("title").textContent = "Not found";
+      document.getElementById("status").textContent = "Unknown session.";
+      return;
+    }
+    const d = await res.json();
+
+    document.getElementById("title").textContent = `Session ${d.session_id}`;
+    document.getElementById("subtitle").textContent =
+      `Install: ${(d.anon_id || "").slice(0, 8)}... -- started ${fmtTs(d.session_start)}, last activity ${fmtTs(d.last_seen_at)}`;
+
+    document.getElementById("export").innerHTML = `
+      <div class="card">
+        <a class="btn" href="/report.csv?scope=observations&session_id=${encodeURIComponent(d.session_id)}">Observations CSV</a>
+        &nbsp;
+        <a class="btn btn-secondary" href="/report.csv?scope=items&session_id=${encodeURIComponent(d.session_id)}">Items CSV</a>
+      </div>`;
+
+    document.getElementById("rows").innerHTML = d.events.length
+      ? d.events.map((e) => `
+          <tr>
+            <td class="mono">${escapeHtml(e.timestamp || "-")}</td>
+            <td>${e.event_type}</td>
+            <td>${escapeHtml(e.target || e.enemy_id || "-")}</td>
+            <td>${renderDetail(e)}</td>
+            <td>${renderItems(e.items)}</td>
+          </tr>`).join("")
+      : '<tr><td colspan="5" class="empty">No events in this session</td></tr>';
+
+    document.getElementById("status").textContent = `${d.events.length} event(s).`;
+  } catch (e) {
+    document.getElementById("status").textContent = "Failed to load data.";
+  }
+}
+init();
+</script>
+</body>
+</html>

@@ -1,0 +1,103 @@
+/* Shared styling for Kraken's Ledger's static viewer pages -- same dark
+   palette/card language as loot_wiki_backend/static, kept in its own
+   file (unlike loot_wiki's per-page inline <style>) since this viewer
+   has four pages instead of three and duplicating ~150 lines four times
+   would make any future tweak a four-way find/replace. */
+:root {
+  --bg: #20242b;
+  --panel: #262b33;
+  --fg: #e8e6df;
+  --grey: #9a9a9a;
+  --accent: #6fb8e8;
+  --accent2: #d8b25a;
+  --border: #3a4150;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  padding: 24px 16px 64px;
+}
+.wrap { max-width: 1100px; margin: 0 auto; }
+h1 { color: var(--accent); font-size: 1.4rem; margin: 0 0 4px; }
+.subtitle { color: var(--grey); font-size: 0.85rem; margin: 0 0 20px; }
+a { color: var(--accent); }
+.nav-links { margin-bottom: 20px; font-size: 0.85rem; }
+.nav-links a { margin-right: 16px; text-decoration: none; }
+.nav-links a:hover { text-decoration: underline; }
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.stat-tile {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.stat-tile .value { font-size: 1.5rem; font-weight: 700; color: var(--accent2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stat-tile .label { color: var(--grey); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+.card h2 { font-size: 1rem; color: var(--accent); margin: 0 0 12px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+th { color: var(--grey); font-weight: 600; cursor: default; user-select: none; }
+th.sortable { cursor: pointer; }
+th.sortable:hover { color: var(--fg); }
+th.sort-active { color: var(--accent); }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover { background: rgba(111, 184, 232, 0.08); }
+
+.rarity-Legendary { color: #E82020; }
+.rarity-Famed { color: #2050E8; }
+.rarity-Rare { color: #20C820; }
+.rarity-Common { color: #E8D020; }
+.rarity-Crude { color: #9A9A9A; }
+
+.link-linked { color: #6fcf6f; }
+.link-ambiguous { color: #e8d020; }
+.link-unlinked { color: #9a9a9a; }
+
+.empty { color: var(--grey); font-style: italic; }
+.status { color: var(--grey); margin-top: 24px; text-align: center; font-size: 0.85rem; }
+.mono { font-family: Consolas, monospace; font-size: 0.85rem; }
+
+select, input[type="text"] {
+  padding: 6px 8px;
+  font-size: 0.9rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+}
+button, .btn {
+  padding: 7px 14px;
+  font-size: 0.85rem;
+  background: var(--accent2);
+  color: #20242b;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+button:hover, .btn:hover { filter: brightness(1.1); }
+.btn-secondary { background: var(--border); color: var(--fg); }
+
+.filter-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.filter-row label { color: var(--grey); font-size: 0.8rem; }
+
+.pager { display: flex; gap: 10px; align-items: center; margin-top: 12px; }

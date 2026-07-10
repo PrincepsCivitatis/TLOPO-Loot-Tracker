@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Kraken's Ledger -- Enemy</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/assets/common.css">
+</head>
+<body>
+<div class="wrap">
+  <h1 id="enemy-title">Loading...</h1>
+  <p class="subtitle" id="enemy-subtitle"></p>
+  <div class="nav-links">
+    <a href="/">Dashboard</a>
+    <a href="/sessions_page">Sessions</a>
+  </div>
+
+  <div id="stats" class="stat-grid"></div>
+  <div id="body"></div>
+  <div class="status" id="status"></div>
+</div>
+
+<script>
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+const enemyId = decodeURIComponent(window.location.pathname.split("/").pop());
+const RARITY_ORDER = ["Legendary", "Famed", "Rare", "Common", "Crude"];
+
+function pct(n, total) {
+  return total ? ((n / total) * 100).toFixed(1) + "%" : "-";
+}
+
+function renderCountTable(title, counts, cssClassFn) {
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const rows = entries
+    .map(([k, v]) => `<tr><td class="${cssClassFn ? cssClassFn(k) : ''}">${escapeHtml(k)}</td><td>${v}</td><td>${pct(v, total)}</td></tr>`)
+    .join("");
+  return `
+    <div class="card">
+      <h2>${escapeHtml(title)}</h2>
+      <table>
+        <tr><th>Value</th><th>Count</th><th>%</th></tr>
+        ${rows || '<tr><td colspan="3" class="empty">No data</td></tr>'}
+      </table>
+    </div>`;
+}
+
+function renderRarities(rarities) {
+  const total = Object.values(rarities).reduce((a, b) => a + b, 0);
+  const rows = RARITY_ORDER
+    .filter((r) => rarities[r])
+    .map((r) => `<tr><td class="rarity-${r}">${r}</td><td>${rarities[r]}</td><td>${pct(rarities[r], total)}</td></tr>`)
+    .join("");
+  return `
+    <div class="card">
+      <h2>Item Rarity Distribution</h2>
+      <table>
+        <tr><th>Rarity</th><th>Count</th><th>%</th></tr>
+        ${rows || '<tr><td colspan="3" class="empty">No rarity data</td></tr>'}
+      </table>
+    </div>`;
+}
+
+function renderTopItems(items) {
+  const rows = items
+    .map((i) => `
+      <tr>
+        <td class="${i.rarity ? 'rarity-' + i.rarity : ''}">${escapeHtml(i.item_name)}</td>
+        <td class="${i.rarity ? 'rarity-' + i.rarity : ''}">${i.rarity || "-"}</td>
+        <td>${i.drops}</td>
+        <td>${i.avg_confidence !== null && i.avg_confidence !== undefined ? i.avg_confidence.toFixed(1) : "-"}</td>
+      </tr>`)
+    .join("");
+  return `
+    <div class="card">
+      <h2>Item Drops</h2>
+      <table>
+        <tr><th>Item</th><th>Rarity</th><th>Drops</th><th>Avg. OCR Confidence</th></tr>
+        ${rows || '<tr><td colspan="4" class="empty">No item data</td></tr>'}
+      </table>
+    </div>`;
+}
+
+function renderSessions(sessionIds) {
+  const rows = sessionIds
+    .map((sid) => `<tr class="clickable" onclick="window.location.href='/session_page/${encodeURIComponent(sid)}'"><td class="mono">${escapeHtml(sid)}</td></tr>`)
+    .join("");
+  return `
+    <div class="card">
+      <h2>Recent Sessions</h2>
+      <table>
+        <tr><th>Session ID</th></tr>
+        ${rows || '<tr><td class="empty">No sessions</td></tr>'}
+      </table>
+    </div>`;
+}
+
+function renderReportLinks() {
+  const enc = encodeURIComponent(enemyId);
+  return `
+    <div class="card">
+      <h2>Export</h2>
+      <a class="btn" href="/report.csv?scope=observations&enemy_id=${enc}">Observations CSV</a>
+      &nbsp;
+      <a class="btn btn-secondary" href="/report.csv?scope=items&enemy_id=${enc}">Items CSV</a>
+    </div>`;
+}
+
+function linkClass(status) {
+  return status === "linked" ? "link-linked" : status === "ambiguous" ? "link-ambiguous" : "link-unlinked";
+}
+
+async function init() {
+  try {
+    const res = await fetch(`/enemies/${encodeURIComponent(enemyId)}`);
+    if (!res.ok) {
+      document.getElementById("enemy-title").textContent = "Not found";
+      document.getElementById("status").textContent = "No data recorded for this enemy yet.";
+      return;
+    }
+    const d = await res.json();
+
+    document.getElementById("enemy-title").textContent = d.display_name;
+    document.getElementById("enemy-subtitle").textContent = `enemy_id: ${d.enemy_id}`;
+
+    document.getElementById("stats").innerHTML = [
+      ["Kills", d.total_kills],
+      ["Chests", d.total_chests],
+      ["Sessions", d.total_sessions],
+    ].map(([label, value]) => `<div class="stat-tile"><div class="value">${value}</div><div class="label">${label}</div></div>`).join("");
+
+    document.getElementById("body").innerHTML =
+      renderCountTable("Kill Capture Quality", d.capture_quality) +
+      renderCountTable("Chest-to-Kill Link Status", d.link_status, linkClass) +
+      renderCountTable("Chest Types", d.chest_types) +
+      renderRarities(d.rarities) +
+      renderTopItems(d.top_items) +
+      renderCountTable("Item Name OCR Confidence Tier", d.confidence_tiers) +
+      renderReportLinks() +
+      renderSessions(d.recent_sessions);
+
+    document.getElementById("status").textContent = "";
+  } catch (e) {
+    document.getElementById("status").textContent = "Failed to load data.";
+  }
+}
+init();
+</script>
+</body>
+</html>
