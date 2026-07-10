@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TLOPO Loot Wiki -- Admin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #20242b;
+    --panel: #262b33;
+    --fg: #e8e6df;
+    --grey: #9a9a9a;
+    --accent: #d8b25a;
+    --border: #3a4150;
+    --danger: #e05a5a;
+    --ok: #6bbf6b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    padding: 24px 16px 64px;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { color: var(--accent); font-size: 1.4rem; margin: 0 0 4px; }
+  .subtitle { color: var(--grey); font-size: 0.85rem; margin: 0 0 20px; }
+  .toolbar {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+    align-items: center;
+  }
+  input[type="text"], input[type="password"], input[type="number"] {
+    padding: 8px 10px;
+    font-size: 0.9rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--fg);
+  }
+  input[type="password"] { width: 260px; }
+  input[type="text"] { width: 220px; }
+  button {
+    padding: 8px 12px;
+    font-size: 0.85rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--fg);
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #20242b; border-color: var(--accent); font-weight: 600; }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+  }
+  .cluster-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .cluster-name { font-weight: 600; font-size: 1rem; }
+  .badge {
+    font-size: 0.7rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    color: var(--grey);
+  }
+  .badge.known { color: var(--ok); border-color: var(--ok); }
+  .count { color: var(--grey); font-size: 0.85rem; }
+  .variants {
+    margin-top: 8px;
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+  }
+  .variant-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 0.85rem;
+  }
+  .variant-name { flex: 1; }
+  .variant-count { color: var(--grey); min-width: 40px; text-align: right; }
+  .status { color: var(--grey); font-size: 0.85rem; margin: 10px 0; }
+  .status.error { color: var(--danger); }
+  .status.ok { color: var(--ok); }
+  .hint { color: var(--grey); font-size: 0.78rem; margin-top: -8px; margin-bottom: 16px; }
+  .merge-actions { margin: 10px 0 20px; display: flex; gap: 8px; align-items: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>TLOPO Loot Wiki -- Admin</h1>
+  <p class="subtitle">Fix item-name splits (same item in two clusters) and false merges (two items wrongly combined). Requires the admin token.</p>
+
+  <div class="toolbar">
+    <input type="password" id="token" placeholder="Admin token (X-Admin-Token)">
+    <button id="saveToken" class="primary">Save token</button>
+    <input type="text" id="target" placeholder="Target (e.g. General Hex) -- blank = all">
+    <input type="text" id="search" placeholder="Filter by name...">
+    <button id="load">Load clusters</button>
+  </div>
+  <div class="hint">
+    Check exactly two clusters below and click "Merge selected" to fix a split. Click a variant's "Move out" to fix a false merge (pull one spelling into a new or existing cluster). Click "Delete" on a cluster that isn't a real item at all (pure OCR noise) -- the chest it was recorded on still counts, it just loses the fake item.
+  </div>
+
+  <div class="merge-actions">
+    <button id="mergeSelected">Merge selected (2 checked)</button>
+    <span id="mergeHint" class="count"></span>
+  </div>
+
+  <div id="status" class="status"></div>
+  <div id="clusters"></div>
+</div>
+
+<script>
+const tokenInput = document.getElementById("token");
+const statusEl = document.getElementById("status");
+const clustersEl = document.getElementById("clusters");
+const selected = new Set();
+
+tokenInput.value = localStorage.getItem("tlopo_admin_token") || "";
+
+// Supports being linked to directly from the main wiki page's "Edit
+// this page" link (index.html), e.g. /admin?target=General%20Hex --
+// pre-fills and auto-loads that target's items instead of starting
+// from the full, unscoped cluster list.
+const urlTarget = new URLSearchParams(window.location.search).get("target");
+if (urlTarget) document.getElementById("target").value = urlTarget;
+
+document.getElementById("saveToken").addEventListener("click", () => {
+  localStorage.setItem("tlopo_admin_token", tokenInput.value.trim());
+  setStatus("Token saved.", "ok");
+});
+
+document.getElementById("load").addEventListener("click", loadClusters);
+document.getElementById("search").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") loadClusters();
+});
+document.getElementById("target").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") loadClusters();
+});
+document.getElementById("mergeSelected").addEventListener("click", mergeSelected);
+
+if (urlTarget && tokenInput.value) loadClusters();
+
+function setStatus(msg, kind) {
+  statusEl.textContent = msg;
+  statusEl.className = "status" + (kind ? " " + kind : "");
+}
+
+function authHeaders() {
+  return { "X-Admin-Token": tokenInput.value.trim(), "Content-Type": "application/json" };
+}
+
+async function apiCall(path, opts) {
+  const res = await fetch(path, opts);
+  if (res.status === 401) {
+    setStatus("Invalid or missing admin token.", "error");
+    throw new Error("unauthorized");
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    setStatus("Error: " + (body.detail || res.status), "error");
+    throw new Error("request failed");
+  }
+  return res.json();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+async function loadClusters() {
+  selected.clear();
+  updateMergeHint();
+  setStatus("Loading...");
+  const q = document.getElementById("search").value.trim();
+  const target = document.getElementById("target").value.trim();
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  if (target) params.set("target", target);
+  const qs = params.toString();
+  try {
+    const data = await apiCall(`/admin/clusters${qs ? "?" + qs : ""}`, { headers: authHeaders() });
+    renderClusters(data.clusters || []);
+    setStatus(`${data.clusters.length} cluster(s)${target ? ` for "${target}"` : ""}.`);
+  } catch (e) {
+    // status already set by apiCall
+  }
+}
+
+function renderClusters(clusters) {
+  clustersEl.innerHTML = clusters.map(renderCluster).join("");
+  clusters.forEach((c) => {
+    const cb = document.getElementById(`sel-${c.id}`);
+    cb.addEventListener("change", () => {
+      if (cb.checked) selected.add(c.id); else selected.delete(c.id);
+      updateMergeHint();
+    });
+    const renameBtn = document.getElementById(`rename-${c.id}`);
+    renameBtn.addEventListener("click", () => renameCluster(c));
+    const deleteBtn = document.getElementById(`delete-${c.id}`);
+    deleteBtn.addEventListener("click", () => deleteCluster(c));
+    c.variants.forEach((v) => {
+      const moveBtn = document.getElementById(`move-${cssSafe(v.raw_name)}`);
+      if (moveBtn) moveBtn.addEventListener("click", () => moveVariant(v.raw_name));
+    });
+  });
+}
+
+function cssSafe(s) {
+  return s.replace(/[^a-zA-Z0-9]/g, "_");
+}
+
+function renderCluster(c) {
+  const variantsHtml = c.variants
+    .map(
+      (v) => `
+      <div class="variant-row">
+        <span class="variant-name">${escapeHtml(v.raw_name)}</span>
+        <span class="variant-count">${v.count}</span>
+        <button id="move-${cssSafe(v.raw_name)}">Move out</button>
+      </div>`
+    )
+    .join("");
+  return `
+    <div class="card">
+      <div class="cluster-head">
+        <input type="checkbox" id="sel-${c.id}">
+        <span class="cluster-name">${escapeHtml(c.canonical_name)}</span>
+        <span class="badge ${c.is_known ? "known" : ""}">${c.is_known ? "known-item" : "self-learned"}</span>
+        <span class="count">total ${c.total_count}, id ${c.id}</span>
+        <button id="rename-${c.id}">Rename / lock</button>
+        <button id="delete-${c.id}" class="danger">Delete (not a real item)</button>
+      </div>
+      <div class="variants">${variantsHtml}</div>
+    </div>`;
+}
+
+function updateMergeHint() {
+  document.getElementById("mergeHint").textContent =
+    selected.size === 0 ? "" : `${selected.size} selected`;
+}
+
+async function mergeSelected() {
+  if (selected.size !== 2) {
+    setStatus("Select exactly two clusters to merge.", "error");
+    return;
+  }
+  const [a, b] = [...selected];
+  const keepId = prompt(`Keep which cluster id as the survivor? (${a} or ${b})`, String(a));
+  if (keepId === null) return;
+  const keep = parseInt(keepId, 10);
+  const merge = keep === a ? b : a;
+  if (keep !== a && keep !== b) {
+    setStatus("Must be one of the selected cluster ids.", "error");
+    return;
+  }
+  const name = prompt("Canonical name for the merged cluster (blank = keep existing):", "");
+  const markKnown = confirm("Lock the merged result as an authoritative known-item (won't be outvoted later)?");
+  try {
+    const data = await apiCall("/admin/merge", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        keep_cluster_id: keep,
+        merge_cluster_id: merge,
+        canonical_name: name || null,
+        mark_known: markKnown,
+      }),
+    });
+    setStatus(`Merged into "${data.canonical_name}".`, "ok");
+    loadClusters();
+  } catch (e) {}
+}
+
+async function renameCluster(c) {
+  const name = prompt("New canonical name:", c.canonical_name);
+  if (!name) return;
+  const markKnown = confirm("Lock as authoritative known-item?");
+  try {
+    await apiCall("/admin/rename", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ cluster_id: c.id, canonical_name: name, mark_known: markKnown }),
+    });
+    setStatus(`Renamed to "${name}".`, "ok");
+    loadClusters();
+  } catch (e) {}
+}
+
+async function deleteCluster(c) {
+  const variantList = c.variants.map((v) => v.raw_name).join(", ");
+  const ok = confirm(
+    `Delete "${c.canonical_name}" (${c.total_count} occurrence(s): ${variantList})?\n\n` +
+    `This is for OCR noise that isn't a real item -- the chests it was recorded on stay counted, they just lose this fake item. This cannot be undone from here.`
+  );
+  if (!ok) return;
+  try {
+    await apiCall("/admin/delete_item", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ cluster_id: c.id }),
+    });
+    setStatus(`Deleted "${c.canonical_name}".`, "ok");
+    loadClusters();
+  } catch (e) {}
+}
+
+async function moveVariant(rawName) {
+  const targetId = prompt(
+    `Move "${rawName}" to which cluster id? Leave blank to create a NEW cluster instead.`,
+    ""
+  );
+  if (targetId === null) return;
+  let body;
+  if (targetId.trim()) {
+    body = { raw_name: rawName, target_cluster_id: parseInt(targetId, 10) };
+  } else {
+    const newName = prompt(`New canonical name for "${rawName}"'s own cluster:`, rawName);
+    if (!newName) return;
+    body = { raw_name: rawName, new_canonical_name: newName };
+  }
+  try {
+    await apiCall("/admin/move_variant", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify(body),
+    });
+    setStatus(`Moved "${rawName}".`, "ok");
+    loadClusters();
+  } catch (e) {}
+}
+</script>
+</body>
+</html>
