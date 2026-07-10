@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime
 from typing import Optional
 
-from enrichment import CLIENT_DB_FIELDS, compute_session_statistics, enrich_events
+from enrichment import CLIENT_DB_FIELDS, CLIENT_DB_PROVENANCE_FIELDS, compute_session_statistics, enrich_events
 from loot_parser import RARITY_ORDER
 from session import Session
 
@@ -141,14 +141,20 @@ def export_to_excel(session: Session, folder: Optional[str] = None) -> str:
     ws_raw = wb.create_sheet("Raw Events")
     client_db_headers = ["Boss Group", "Enemy Base Type", "Expected Rare Chest %",
                           "Enemy Family", "Known Level Range", "Known Boss Status"]
+    # Evidence-status columns ride alongside the client-DB columns rather
+    # than being folded into them, so a reader can see at a glance
+    # whether the row's Boss Group/Base Type/etc. values are "verified"
+    # or merely "reported"/"inferred" -- see enrichment.CLIENT_DB_LOOKUP.
+    evidence_headers = ["Evidence Status", "Evidence Source", "Evidence Notes"]
     headers_raw = ["Observation ID", "Timestamp", "Event Type", "Target", "Enemy Color",
-                    "Location", "Associated Kill #", "Linked Kill Observation ID",
+                    "Location", "Associated Kill #", "Linked Kill Observation ID", "Link Status",
                     "Capture Quality", "Chest Type", "Item Name", "Item Category", "Category Group",
-                    "Rarity", "OCR Confidence", "Confidence Tier", "Gold", "Chest Correlation ID"] + client_db_headers
+                    "Rarity", "OCR Confidence", "Confidence Tier", "Gold", "Chest Correlation ID"] \
+        + client_db_headers + evidence_headers
     ws_raw.append(headers_raw)
     for c in ws_raw[1]:
         c.font = Font(bold=True)
-    RARITY_COL = 14  # 1-indexed "Rarity" column, for per-row fill/font below
+    RARITY_COL = 15  # 1-indexed "Rarity" column, for per-row fill/font below
 
     for event in enrich_events(session):
         base = [
@@ -157,11 +163,14 @@ def export_to_excel(session: Session, folder: Optional[str] = None) -> str:
             event.get("enemy_color") or "", event.get("location") or "",
             event.get("associated_kill_number", event.get("kill_number", 0)),
             event.get("linked_kill_observation_id") or "",
+            event.get("link_status") or "",
         ]
         client_db_values = [event.get(f) for f in
                              ["boss_group", "enemy_base_type", "expected_rare_chest_pct",
                               "enemy_family", "known_level_range", "known_boss_status"]]
         client_db_values = [v if v is not None else "" for v in client_db_values]
+        evidence_values = [event.get(f) or "" for f in CLIENT_DB_PROVENANCE_FIELDS]
+        client_db_values = client_db_values + evidence_values
 
         if event.get("event_type") == "kill":
             ws_raw.append(base + [event.get("capture_quality", ""), "", "", "", "", "",
@@ -482,6 +491,7 @@ def export_to_text(session: Session, folder: Optional[str] = None) -> str:
                 lines.append(f"Kill #: {event.get('kill_number', 0)}")
             else:
                 lines.append(f"Associated Kill #: {event.get('associated_kill_number', 0)}")
+                lines.append(f"Link Status: {event.get('link_status', 'unlinked')}")
                 if event.get("linked_kill_observation_id"):
                     lines.append(f"Linked Kill Observation: {event['linked_kill_observation_id']}")
             lines.append(f"Enemy: {event.get('target', '')}")
@@ -492,7 +502,13 @@ def export_to_text(session: Session, folder: Optional[str] = None) -> str:
             # Client-DB-sourced fields (see enrichment.CLIENT_DB_LOOKUP) --
             # only printed when non-blank, so today's output (an empty
             # lookup table) looks the same as before this join point
-            # existed.
+            # existed. Each is suffixed with its evidence_status (see
+            # enrichment.CLIENT_DB_PROVENANCE_FIELDS) so a "reported" or
+            # "inferred" value is never presented indistinguishably from
+            # a "verified" one -- required by this project's evidence-tier
+            # rule (see the loot-tracker experimental-branch spec / RE
+            # bible: "no export may silently convert Tier C or E into fact").
+            evidence_status = event.get("evidence_status")
             for field_name, label in [
                 ("boss_group", "Boss Group"), ("enemy_base_type", "Enemy Base Type"),
                 ("expected_rare_chest_pct", "Expected Rare Chest %"),
@@ -500,7 +516,12 @@ def export_to_text(session: Session, folder: Optional[str] = None) -> str:
                 ("known_boss_status", "Known Boss Status"),
             ]:
                 if event.get(field_name) is not None:
-                    lines.append(f"{label}: {event[field_name]}")
+                    suffix = f" ({evidence_status})" if evidence_status else " (evidence status unknown)"
+                    lines.append(f"{label}: {event[field_name]}{suffix}")
+            if evidence_status is not None and event.get("evidence_source"):
+                lines.append(f"Evidence Source: {event['evidence_source']}")
+            if evidence_status is not None and event.get("evidence_notes"):
+                lines.append(f"Evidence Notes: {event['evidence_notes']}")
             if is_kill:
                 lines.append(f"Capture Quality: {event.get('capture_quality', '')}")
             else:
@@ -546,7 +567,7 @@ def export_to_sqlite(session: Session, folder: Optional[str] = None) -> str:
     for one export format, same precedent as kraken_ledger_client.py's own
     stdlib-only network calls.
 
-    Schema v2 (see enrichment.py for where the derived columns come
+    Schema v3 (see enrichment.py for where the derived columns come
     from) -- a thin `observations` envelope (one row per kill OR loot
     event) with `kill_events`/`loot_events` detail tables underneath it,
     plus `enemies`/`locations` reference tables and a `session_statistics`
@@ -554,17 +575,24 @@ def export_to_sqlite(session: Session, folder: Optional[str] = None) -> str:
       sessions(session_id PK, session_start, exported_at)
       enemies(enemy_id PK, display_name, boss_group, enemy_base_type,
         expected_rare_chest_pct, enemy_family, known_level_range,
-        known_boss_status)
+        known_boss_status, evidence_status, evidence_source,
+        evidence_notes)
       locations(location_id PK)
       observations(observation_id PK, session_id FK, event_type,
         timestamp, enemy_id FK, enemy_color, location_id FK)
       kill_events(observation_id PK/FK, kill_number, capture_quality)
       loot_events(observation_id PK/FK, associated_kill_number,
-        linked_kill_observation_id FK, chest_type, gold, capture_quality,
-        chest_correlation_id)
+        linked_kill_observation_id FK, link_status, chest_type, gold,
+        capture_quality, chest_correlation_id)
       items(id PK, observation_id FK -> loot_events, item_name, rarity,
         category, name_confidence, confidence_tier)
       session_statistics(session_id FK, metric, value, ci_low, ci_high)
+
+    v3 adds enemies.evidence_status/evidence_source/evidence_notes (see
+    enrichment.CLIENT_DB_PROVENANCE_FIELDS) and loot_events.link_status
+    (see enrichment.enrich_events) -- an enemy row's boss_group/
+    enemy_base_type/etc. columns must never be read as verified fact
+    without checking evidence_status alongside them.
 
     A `Containers` table was deliberately NOT added -- a container has no
     existence independent of the one loot_events row that observed it, so
@@ -589,7 +617,7 @@ def export_to_sqlite(session: Session, folder: Optional[str] = None) -> str:
     conn = sqlite3.connect(path)
     try:
         cur = conn.cursor()
-        cur.execute("PRAGMA user_version = 2")  # schema generation marker -- v1 was the flat single-table observations/observation_items shape from the prior export round
+        cur.execute("PRAGMA user_version = 3")  # schema generation marker -- v1 was the flat single-table observations/observation_items shape from the prior export round, v2 added the normalized tables below, v3 added evidence/link_status columns (see docstring above)
 
         cur.execute("CREATE TABLE sessions(session_id TEXT PRIMARY KEY, session_start REAL, exported_at REAL)")
         cur.execute("""
@@ -601,7 +629,10 @@ def export_to_sqlite(session: Session, folder: Optional[str] = None) -> str:
                 expected_rare_chest_pct REAL,
                 enemy_family TEXT,
                 known_level_range TEXT,
-                known_boss_status TEXT
+                known_boss_status TEXT,
+                evidence_status TEXT,
+                evidence_source TEXT,
+                evidence_notes TEXT
             )
         """)
         cur.execute("CREATE TABLE locations(location_id TEXT PRIMARY KEY)")
@@ -628,6 +659,7 @@ def export_to_sqlite(session: Session, folder: Optional[str] = None) -> str:
                 observation_id TEXT PRIMARY KEY REFERENCES observations(observation_id),
                 associated_kill_number INTEGER,
                 linked_kill_observation_id TEXT REFERENCES observations(observation_id),
+                link_status TEXT,
                 chest_type TEXT,
                 gold INTEGER,
                 capture_quality TEXT,
@@ -679,8 +711,12 @@ def export_to_sqlite(session: Session, folder: Optional[str] = None) -> str:
             if enemy_id and enemy_id not in seen_enemy_ids:
                 seen_enemy_ids.add(enemy_id)
                 cur.execute(
-                    "INSERT INTO enemies VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (enemy_id, event.get("target"), *(event.get(f) for f in CLIENT_DB_FIELDS)),
+                    "INSERT INTO enemies VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        enemy_id, event.get("target"),
+                        *(event.get(f) for f in CLIENT_DB_FIELDS),
+                        *(event.get(f) for f in CLIENT_DB_PROVENANCE_FIELDS),
+                    ),
                 )
 
             location_id = event.get("location") or None
@@ -703,10 +739,11 @@ def export_to_sqlite(session: Session, folder: Optional[str] = None) -> str:
                 )
             else:
                 cur.execute(
-                    "INSERT INTO loot_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO loot_events VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         observation_id, event.get("associated_kill_number"),
-                        event.get("linked_kill_observation_id"), event.get("chest_type"),
+                        event.get("linked_kill_observation_id"), event.get("link_status"),
+                        event.get("chest_type"),
                         event.get("gold"), event.get("capture_quality"), event.get("session_id"),
                     ),
                 )

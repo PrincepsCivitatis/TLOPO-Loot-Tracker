@@ -27,17 +27,36 @@ from stats import rate_with_ci
 
 # Drop-in point for the recovered TLOPO client database. Empty today --
 # every field below exports as blank until that database (or a JSON/CSV
-# built from it) gets loaded into this dict, keyed by canonical enemy
-# name (see loot_parser.KNOWN_BOSS_NAMES). A value need only include the
-# fields it actually has; anything missing just stays blank on export.
-# No export code needs to change when this gets populated -- that's the
-# whole point of this module existing separately from exporter.py.
+# built from it) gets loaded into this dict, keyed by canonical enemy ID
+# (loot_parser.canonical_enemy_id() of the display name -- e.g.
+# "cicatriz", not "Cicatriz" -- so spelling/alias variants of the same
+# enemy still join correctly; see loot_parser.KNOWN_BOSS_NAMES for the
+# display-name pool these IDs are derived from). A value need only
+# include the fields it actually has; anything missing just stays blank
+# on export. No export code needs to change when this gets populated --
+# that's the whole point of this module existing separately from
+# exporter.py.
+#
+# Every entry MUST also carry the three CLIENT_DB_PROVENANCE_FIELDS
+# below. This project's source docs (the loot-tracker experimental-
+# branch spec and the TLOPO reverse-engineering bible) are explicit that
+# reverse-engineered client data is not authoritative until independently
+# verified, and that no export may silently present a reported/inferred
+# value as fact. Concretely: evidence_status must be one of "verified"
+# (reproduced from a retained artifact), "reported" (claimed in prior
+# research but not independently reproduced here), "inferred"
+# (structural guess, not a direct extraction), or "unresolved". Do not
+# add an entry without evidence_status -- exporter.py surfaces it
+# wherever a CLIENT_DB_FIELDS value is shown so a reader never mistakes
+# "reported" for "verified".
 CLIENT_DB_LOOKUP: Dict[str, dict] = {}
 
 CLIENT_DB_FIELDS = [
     "boss_group", "enemy_base_type", "expected_rare_chest_pct",
     "enemy_family", "known_level_range", "known_boss_status",
 ]
+
+CLIENT_DB_PROVENANCE_FIELDS = ["evidence_status", "evidence_source", "evidence_notes"]
 
 # Max seconds apart a kill event and a loot event can be to link. Real
 # session data (TLOPO_Session_2026-07-09_23-13) showed genuine matches
@@ -65,8 +84,9 @@ def enrich_events(session) -> List[dict]:
     mutates session.raw_events itself.
 
     Adds to every event:
-      - the 6 CLIENT_DB_FIELDS, from CLIENT_DB_LOOKUP.get(target, {})
-        (all None today -- see the module docstring).
+      - the 6 CLIENT_DB_FIELDS plus the 3 CLIENT_DB_PROVENANCE_FIELDS,
+        from CLIENT_DB_LOOKUP.get(canonical_enemy_id(target), {}) (all
+        None today -- see the module docstring).
 
     Adds to "chest" events:
       - "associated_kill_number": alias of the event's own kill_number,
@@ -83,6 +103,14 @@ def enrich_events(session) -> List[dict]:
         (health-bar) and loot detection (popup OCR) are independent
         detectors in detector.py, so even a correct match by proximity
         isn't a guaranteed causal link, just the most plausible one.
+      - "link_status": "linked" (a unique nearest kill was found),
+        "unlinked" (no candidate kill within MATCH_WINDOW_SECONDS), or
+        "ambiguous" (two or more unused candidate kills are exactly
+        tied for nearest -- linked_kill_observation_id still picks one,
+        chronologically-first, but callers that care about linkage
+        confidence should treat an "ambiguous" link as lower-trust than
+        "linked"). There is no "manual" status yet -- that needs a GUI
+        relinking workflow this repo doesn't have.
 
     Adds to "kill" events:
       - "capture_quality": "Has Loot" if some loot event linked back to
@@ -94,9 +122,10 @@ def enrich_events(session) -> List[dict]:
     events = [dict(e) for e in session.raw_events]
 
     for event in events:
-        event["enemy_id"] = canonical_enemy_id(event.get("target") or "")
-        client_fields = CLIENT_DB_LOOKUP.get(event.get("target"), {})
-        for field_name in CLIENT_DB_FIELDS:
+        enemy_id = canonical_enemy_id(event.get("target") or "")
+        event["enemy_id"] = enemy_id
+        client_fields = CLIENT_DB_LOOKUP.get(enemy_id, {})
+        for field_name in CLIENT_DB_FIELDS + CLIENT_DB_PROVENANCE_FIELDS:
             event[field_name] = client_fields.get(field_name)
 
     # kills_by_target: target -> list of (index into `events`, timestamp
@@ -118,12 +147,14 @@ def enrich_events(session) -> List[dict]:
             continue
         event["associated_kill_number"] = event.get("kill_number")
         event["linked_kill_observation_id"] = None
+        event["link_status"] = "unlinked"
 
         loot_ts = _parse_hms_seconds(event.get("timestamp"))
         if loot_ts is None:
             continue
         candidates = kills_by_target.get(event.get("target"), [])
         best = None  # (abs_time_diff, candidate_record)
+        tie_count = 0
         for record in candidates:
             idx, kill_ts, used = record
             if used or kill_ts is None:
@@ -133,12 +164,16 @@ def enrich_events(session) -> List[dict]:
                 continue
             if best is None or diff < best[0]:
                 best = (diff, record)
+                tie_count = 1
+            elif diff == best[0]:
+                tie_count += 1
 
         if best is not None:
             record = best[1]
             record[2] = True  # mark this kill used -- never reused for another loot event
             kill_observation_id = events[record[0]].get("observation_id")
             event["linked_kill_observation_id"] = kill_observation_id
+            event["link_status"] = "ambiguous" if tie_count > 1 else "linked"
             linked_kill_ids.add(kill_observation_id)
 
     for event in events:
