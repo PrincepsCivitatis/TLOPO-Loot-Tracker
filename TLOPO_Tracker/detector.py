@@ -318,6 +318,25 @@ HEALTH_BAR_MIN_ASPECT_RATIO = 3.0
 # real boss bar when it isn't the single largest blob on screen.
 HEALTH_BAR_MAX_CANDIDATES = 4
 
+# The boss health bar + nameplate always renders in the same fixed,
+# top-center screen region regardless of which boss it is (confirmed
+# 2026-07-10 against a full, uncropped gameplay screenshot -- a Devil
+# Root LV33 fight -- where the bar+nameplate cluster measured roughly
+# x 45-60%, y 2-12% of the full window). Widened with generous margin
+# for longer boss names (e.g. "Remington the Vicious") and minor
+# per-install UI-scale variance, while still safely excluding every
+# other bar-shaped/colored thing that used to produce false-positive
+# candidates and send the nameplate OCR crop to the wrong part of the
+# screen: the player's own HUD health bar (top-left, x < 20%), the crew
+# roster's individual health bars (left edge, x < 12%), floating combat
+# damage numbers and chat text (scattered, but nowhere near this
+# region), and the minimap/quest-tracker cluster (top-right, x > 70%).
+# _find_health_bar_candidates restricts its connected-component search
+# to this box so nothing outside it can ever be considered a candidate
+# in the first place -- this is what makes the OCR "tight," not a
+# stricter fuzzy-match threshold.
+BOSS_BAR_SEARCH_REGION_FRAC = (0.36, 0.0, 0.66, 0.16)  # (x1, y1, x2, y2) as fractions of frame width/height
+
 # Minimum time between candidate-matching OCR attempts while NOT
 # currently tracking a boss -- i.e. while every candidate blob found
 # keeps failing to match a known boss name (the player's own HUD bar,
@@ -1321,11 +1340,32 @@ class LootDetector:
         bar out-sizes it. The caller (_scan_health_bar) tries each
         candidate's nameplate in turn until one matches a known boss
         name.
+
+        The search itself is restricted to BOSS_BAR_SEARCH_REGION_FRAC --
+        see that constant's docstring -- by cropping both masks to that
+        region before labeling, rather than labeling the full frame and
+        filtering results afterward. This is what actually fixes mixed-
+        up/misspelled auto-detected names (GitHub issue #7 follow-up):
+        every other bar-shaped colored region on screen (player HUD,
+        crew bars, floating combat numbers) is now structurally
+        impossible to return as a candidate, so the nameplate OCR crop
+        that follows is always anchored near the real boss nameplate.
+        All returned box coordinates are offset back into full-frame
+        space before returning, so callers never need to know cropping
+        happened.
         """
         h, w = frame.shape[0], frame.shape[1]
         candidates: List[Tuple[Tuple[int, int, int, int], float]] = []
 
-        total_matching = int(fill_mask.sum())
+        rx1 = int(BOSS_BAR_SEARCH_REGION_FRAC[0] * w)
+        ry1 = int(BOSS_BAR_SEARCH_REGION_FRAC[1] * h)
+        rx2 = int(BOSS_BAR_SEARCH_REGION_FRAC[2] * w)
+        ry2 = int(BOSS_BAR_SEARCH_REGION_FRAC[3] * h)
+        region_fill = fill_mask[ry1:ry2, rx1:rx2]
+        region_track = track_mask[ry1:ry2, rx1:rx2]
+        region_h, region_w = region_fill.shape[0], region_fill.shape[1]
+
+        total_matching = int(region_fill.sum())
         min_required = HEALTH_BAR_MIN_REGION_FRACTION * h * w
         if total_matching < min_required:
             return candidates
@@ -1336,11 +1376,11 @@ class LootDetector:
             self.on_error(f"scipy is required for detection but failed to load: {e}")
             return candidates
 
-        labeled, num_features = ndimage.label(fill_mask)
+        labeled, num_features = ndimage.label(region_fill)
         if num_features == 0:
             return candidates
 
-        sizes = ndimage.sum(fill_mask, labeled, index=range(1, num_features + 1))
+        sizes = ndimage.sum(region_fill, labeled, index=range(1, num_features + 1))
         order = np.argsort(sizes)[::-1]  # largest component first
 
         for idx in order:
@@ -1357,14 +1397,14 @@ class LootDetector:
             if box_w / box_h < HEALTH_BAR_MIN_ASPECT_RATIO:
                 continue  # not a wide strip -- some other colored blob (chat text, combat numbers, etc.)
 
-            full_x2 = self._extend_track_right(track_mask, x1, x2, y1, y2, w)
-            full_y1, full_y2 = self._expand_bar_rows(fill_mask, track_mask, x1, full_x2, y1, y2, h)
-            fill_count = int(fill_mask[full_y1:full_y2, x1:full_x2].sum())
-            track_count = int(track_mask[full_y1:full_y2, x1:full_x2].sum())
+            full_x2 = self._extend_track_right(region_track, x1, x2, y1, y2, region_w)
+            full_y1, full_y2 = self._expand_bar_rows(region_fill, region_track, x1, full_x2, y1, y2, region_h)
+            fill_count = int(region_fill[full_y1:full_y2, x1:full_x2].sum())
+            track_count = int(region_track[full_y1:full_y2, x1:full_x2].sum())
             denom = fill_count + track_count
             if denom == 0:
                 continue
-            candidates.append(((x1, full_y1, full_x2, full_y2), fill_count / denom))
+            candidates.append(((rx1 + x1, ry1 + full_y1, rx1 + full_x2, ry1 + full_y2), fill_count / denom))
             if len(candidates) >= HEALTH_BAR_MAX_CANDIDATES:
                 break
 
