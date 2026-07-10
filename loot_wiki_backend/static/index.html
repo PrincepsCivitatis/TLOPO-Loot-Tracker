@@ -24,7 +24,24 @@
   .wrap { max-width: 900px; margin: 0 auto; }
   h1 { color: var(--accent); font-size: 1.4rem; margin: 0 0 4px; }
   .subtitle { color: var(--grey); font-size: 0.85rem; margin: 0 0 20px; }
-  .search-box { position: relative; margin-bottom: 24px; }
+  .search-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  @media (max-width: 600px) {
+    .search-row { grid-template-columns: 1fr; }
+  }
+  .search-box { position: relative; }
+  .search-label {
+    display: block;
+    color: var(--grey);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 4px;
+  }
   input[type="text"] {
     width: 100%;
     padding: 10px 12px;
@@ -67,14 +84,27 @@
     color: var(--accent);
     margin: 0 0 12px;
   }
+  .edit-link {
+    float: right;
+    font-size: 0.75rem;
+    font-weight: normal;
+    color: var(--grey);
+    text-decoration: none;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 6px;
+  }
+  .edit-link:hover { color: var(--fg); border-color: var(--accent); }
   table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
   th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
   th { color: var(--grey); font-weight: 600; }
-  .rarity-Legendary { color: #d97ff0; }
-  .rarity-Famed { color: #f0a83c; }
-  .rarity-Rare { color: #52c4e0; }
-  .rarity-Common { color: #8fd18f; }
-  .rarity-Crude { color: var(--grey); }
+  /* Matches RARITY_DISPLAY_HEX in loot_parser.py exactly, so an item's
+     color here is the same one the player sees in-game/in-tracker. */
+  .rarity-Legendary { color: #E82020; }
+  .rarity-Famed { color: #2050E8; }
+  .rarity-Rare { color: #20C820; }
+  .rarity-Common { color: #E8D020; }
+  .rarity-Crude { color: #9A9A9A; }
   .empty { color: var(--grey); font-style: italic; }
   .stat-row { color: var(--grey); font-size: 0.85rem; margin-bottom: 10px; }
   .status { color: var(--grey); margin-top: 40px; text-align: center; font-size: 0.85rem; }
@@ -88,6 +118,51 @@
     margin-bottom: 16px;
   }
   .tracking-note { color: var(--grey); font-size: 0.8rem; margin-top: 8px; }
+  /* Drop-odds bands (OSRS Wiki-style color banding by how rare a drop
+     is, NOT the same thing as an item's Crude/Common/Rare/Famed/
+     Legendary quality tier above -- a Crude item can still be a rare
+     DROP, and a Legendary item can still be a common one). Filled pill
+     badges rather than colored text so they stay readable regardless of
+     the item-quality text color already on that row. */
+  .odds {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+    font-size: 0.85rem;
+  }
+  .odds-always { background: #7fd8d8; color: #12302f; }
+  .odds-common { background: #6fcf6f; color: #123412; }
+  .odds-uncommon { background: #e8d020; color: #2b2400; }
+  .odds-rare { background: #e8a13c; color: #2b1800; }
+  .odds-veryrare { background: #e85a5a; color: #2b0808; }
+  .container-rarity-block { margin-bottom: 14px; }
+  .container-rarity-block:last-child { margin-bottom: 0; }
+  .container-rarity-block .stat-row {
+    text-transform: capitalize;
+    font-weight: 600;
+    color: var(--fg);
+    margin-bottom: 4px;
+  }
+  /* Flags an observed rate that's wildly off from the POTCO baseline
+     (>1.5x higher or <0.5x lower) -- NOT an error indicator, just a
+     visual nudge that either TLOPO retuned this specific cell or the
+     sample size is still too small to trust yet. */
+  .diff-higher { color: #6fcf6f; font-weight: 600; }
+  .diff-lower { color: #e8a13c; font-weight: 600; }
+  details.misc-details {
+    margin-top: 10px;
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+  }
+  details.misc-details summary {
+    cursor: pointer;
+    color: var(--grey);
+    font-size: 0.85rem;
+    user-select: none;
+  }
+  details.misc-details summary:hover { color: var(--fg); }
+  details.misc-details table { margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -95,98 +170,135 @@
   <h1>TLOPO Loot Wiki</h1>
   <p class="subtitle">Community-sourced, anonymized drop-rate data from opted-in TLOPO_Tracker installs.</p>
 
-  <div class="search-box">
-    <input type="text" id="search" placeholder="Search for a boss/enemy..." autocomplete="off">
-    <div class="suggestions" id="suggestions" style="display:none;"></div>
+  <div class="search-row">
+    <div class="search-box">
+      <label class="search-label" for="search-boss">Bosses / Enemies</label>
+      <input type="text" id="search-boss" placeholder="Search for a boss/enemy..." autocomplete="off">
+      <div class="suggestions" id="suggestions-boss" style="display:none;"></div>
+    </div>
+    <div class="search-box">
+      <label class="search-label" for="search-item">Items</label>
+      <input type="text" id="search-item" placeholder="Search for an item..." autocomplete="off">
+      <div class="suggestions" id="suggestions-item" style="display:none;"></div>
+    </div>
   </div>
 
+  <div id="global-stats"></div>
   <div id="results"></div>
-  <div class="status" id="status">Loading enemy list...</div>
+  <div class="status" id="status">Loading...</div>
 </div>
 
 <script>
-let allEnemies = [];
-let activeIndex = -1;
-
-async function loadEnemies() {
-  try {
-    const res = await fetch("/enemies");
-    const data = await res.json();
-    allEnemies = data.enemies || [];
-    document.getElementById("status").textContent =
-      allEnemies.length ? `${allEnemies.length} enemies with data.` : "No data submitted yet.";
-  } catch (e) {
-    document.getElementById("status").textContent = "Could not reach the backend.";
-  }
-}
-
-function renderSuggestions(matches) {
-  const box = document.getElementById("suggestions");
-  activeIndex = -1;
-  if (!matches.length) {
-    box.style.display = "none";
-    box.innerHTML = "";
-    return;
-  }
-  box.innerHTML = matches
-    .slice(0, 15)
-    .map((name, i) => `<div data-idx="${i}">${escapeHtml(name)}</div>`)
-    .join("");
-  box.style.display = "block";
-  [...box.children].forEach((el) => {
-    el.addEventListener("click", () => selectEnemy(el.textContent));
-  });
-}
-
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
 }
 
-document.getElementById("search").addEventListener("input", (e) => {
-  const q = e.target.value.trim().toLowerCase();
-  if (!q) { renderSuggestions([]); return; }
-  const matches = allEnemies.filter((n) => n.toLowerCase().includes(q));
-  renderSuggestions(matches);
-});
+// Drives both search boxes (bosses and items) from one generalized
+// setup instead of duplicating the input/keydown/click wiring twice --
+// each instance owns its own suggestion list and "what happens when
+// you pick one" callback, everything else about autocomplete behavior
+// is shared.
+function setupSearchBox(inputId, suggestionsId, getList, onSelect) {
+  const input = document.getElementById(inputId);
+  const box = document.getElementById(suggestionsId);
+  let activeIndex = -1;
+  let allNames = [];
 
-document.getElementById("search").addEventListener("keydown", (e) => {
-  const box = document.getElementById("suggestions");
-  const items = [...box.children];
-  if (!items.length) return;
-  if (e.key === "ArrowDown") {
-    e.preventDefault();
-    activeIndex = Math.min(activeIndex + 1, items.length - 1);
-  } else if (e.key === "ArrowUp") {
-    e.preventDefault();
-    activeIndex = Math.max(activeIndex - 1, 0);
-  } else if (e.key === "Enter") {
-    e.preventDefault();
-    if (activeIndex >= 0) selectEnemy(items[activeIndex].textContent);
-    else if (items.length === 1) selectEnemy(items[0].textContent);
-    return;
-  } else {
-    return;
+  function renderSuggestions(matches) {
+    activeIndex = -1;
+    if (!matches.length) {
+      box.style.display = "none";
+      box.innerHTML = "";
+      return;
+    }
+    box.innerHTML = matches
+      .slice(0, 15)
+      .map((name, i) => `<div data-idx="${i}">${escapeHtml(name)}</div>`)
+      .join("");
+    box.style.display = "block";
+    [...box.children].forEach((el) => {
+      el.addEventListener("click", () => pick(el.textContent));
+    });
   }
-  items.forEach((el, i) => el.classList.toggle("active", i === activeIndex));
-});
 
-document.addEventListener("click", (e) => {
-  if (!e.target.closest(".search-box")) {
-    document.getElementById("suggestions").style.display = "none";
+  function pick(name) {
+    input.value = name;
+    box.style.display = "none";
+    onSelect(name);
   }
-});
+
+  input.addEventListener("input", (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    if (!q) { renderSuggestions([]); return; }
+    renderSuggestions(allNames.filter((n) => n.toLowerCase().includes(q)));
+  });
+
+  input.addEventListener("keydown", (e) => {
+    const items = [...box.children];
+    if (!items.length) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      activeIndex = Math.min(activeIndex + 1, items.length - 1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      activeIndex = Math.max(activeIndex - 1, 0);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (activeIndex >= 0) pick(items[activeIndex].textContent);
+      else if (items.length === 1) pick(items[0].textContent);
+      return;
+    } else {
+      return;
+    }
+    items.forEach((el, i) => el.classList.toggle("active", i === activeIndex));
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(`#${inputId}`) && !e.target.closest(`#${suggestionsId}`)) {
+      box.style.display = "none";
+    }
+  });
+
+  getList().then((names) => { allNames = names; });
+}
+
+async function loadEnemies() {
+  try {
+    const res = await fetch("/enemies");
+    const data = await res.json();
+    return data.enemies || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+async function loadItems() {
+  try {
+    const res = await fetch("/items");
+    const data = await res.json();
+    return data.items || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function selectItem(name) {
+  window.location.href = `/item_page/${encodeURIComponent(name)}`;
+}
+
+setupSearchBox("search-boss", "suggestions-boss", loadEnemies, selectEnemy);
+setupSearchBox("search-item", "suggestions-item", loadItems, selectItem);
 
 async function selectEnemy(name) {
-  document.getElementById("search").value = name;
-  document.getElementById("suggestions").style.display = "none";
+  document.getElementById("search-boss").value = name;
   const results = document.getElementById("results");
   results.innerHTML = `<p class="empty">Loading data for ${escapeHtml(name)}...</p>`;
 
   const encoded = encodeURIComponent(name);
-  const [containers, rarities, items, lootTable] = await Promise.all(
-    ["containers", "rarities", "items"].map((kind) =>
+  const [containers, rarities, rarityByContainer, items, lootTable] = await Promise.all(
+    ["containers", "rarities", "rarities_by_container", "items"].map((kind) =>
       fetch(`/rates/${encoded}/${kind}`).then((r) => (r.ok ? r.json() : null))
     ).concat([fetch(`/loot_table/${encoded}`).then((r) => (r.ok ? r.json() : null))])
   );
@@ -199,6 +311,7 @@ async function selectEnemy(name) {
   results.innerHTML =
     renderContainers(name, containers) +
     renderRarities(rarities) +
+    renderRarityByContainer(rarityByContainer) +
     renderItems(items) +
     renderLootTable(lootTable);
 }
@@ -207,10 +320,28 @@ function pct(x) {
   return x === null || x === undefined ? "-" : (x * 100).toFixed(2) + "%";
 }
 
+// OSRS Wiki-style "1/N" drop odds instead of a raw count -- a bare
+// count only means anything relative to the (unshown) total, whereas
+// "1/75" or "Always" is legible on its own. Color-banded by how rare
+// the odds are (see .odds-* in <style>), independent of the item's own
+// Crude/Common/Rare/Famed/Legendary quality tier.
+function formatOdds(rate) {
+  if (rate === null || rate === undefined) return `<span class="odds">-</span>`;
+  if (rate >= 0.999995) return `<span class="odds odds-always">Always</span>`;
+  const n = 1 / rate;
+  const text = "1/" + (n >= 100 ? Math.round(n).toLocaleString() : n.toFixed(1));
+  let cls;
+  if (n <= 50) cls = "odds-common";
+  else if (n <= 150) cls = "odds-uncommon";
+  else if (n <= 1500) cls = "odds-rare";
+  else cls = "odds-veryrare";
+  return `<span class="odds ${cls}">${text}</span>`;
+}
+
 function renderContainers(name, data) {
   if (!data) return "";
   const rows = Object.entries(data.containers)
-    .map(([type, v]) => `<tr><td>${escapeHtml(type)}</td><td>${v.count}</td><td>${pct(v.rate_per_kill)}</td></tr>`)
+    .map(([type, v]) => `<tr><td>${escapeHtml(type)}</td><td>${formatOdds(v.rate_per_kill)}</td></tr>`)
     .join("");
   const warningHtml = data.warning
     ? `<div class="warning">&#9888; ${escapeHtml(data.warning)}</div>`
@@ -219,12 +350,12 @@ function renderContainers(name, data) {
   const trackingNote = `<div class="tracking-note">Kill tracking source: ${kt.auto || 0} auto-detected, ${kt.manual || 0} manual${kt.unknown ? `, ${kt.unknown} unknown` : ""}.</div>`;
   return `
     <div class="card">
-      <h2>${escapeHtml(name)}</h2>
+      <h2>${escapeHtml(name)} <a class="edit-link" href="/admin?target=${encodeURIComponent(name)}" target="_blank" rel="noopener">Edit this page</a></h2>
       ${warningHtml}
       <div class="stat-row">Total kills tracked: ${data.total_kills}</div>
       <table>
-        <tr><th>Container</th><th>Count</th><th>Rate / kill</th></tr>
-        ${rows || '<tr><td colspan="3" class="empty">No container data</td></tr>'}
+        <tr><th>Container</th><th>Drop Rate</th></tr>
+        ${rows || '<tr><td colspan="2" class="empty">No container data</td></tr>'}
       </table>
       ${trackingNote}
     </div>`;
@@ -237,7 +368,7 @@ function renderRarities(data) {
     .filter((r) => data.rarities[r])
     .map((r) => {
       const v = data.rarities[r];
-      return `<tr><td class="rarity-${r}">${r}</td><td>${v.count}</td><td>${pct(v.rate_per_container)}</td></tr>`;
+      return `<tr><td class="rarity-${r}">${r}</td><td>${pct(v.rate_per_container)}</td></tr>`;
     })
     .join("");
   return `
@@ -245,43 +376,152 @@ function renderRarities(data) {
       <h2>Loot Class Rates</h2>
       <div class="stat-row">Total containers opened: ${data.total_containers}</div>
       <table>
-        <tr><th>Rarity</th><th>Count</th><th>Rate / container</th></tr>
-        ${rows || '<tr><td colspan="3" class="empty">No rarity data</td></tr>'}
+        <tr><th>Rarity</th><th>Rate / container</th></tr>
+        ${rows || '<tr><td colspan="2" class="empty">No rarity data</td></tr>'}
       </table>
     </div>`;
 }
 
+function renderRarityByContainer(data, opts) {
+  if (!data) return "";
+  const title = (opts && opts.title) || "Rarity by Container -- TLOPO vs. Original Base Game";
+  const note = (opts && opts.note) || "POTCO baseline is the drop-rate formula coded into the pre-TLOPO base game (not published/confirmed for TLOPO itself) -- a reference point, not a guarantee TLOPO uses the same numbers. Small sample sizes will swing wildly; treat with caution until a container type has hundreds of opens.";
+  const order = ["Legendary", "Famed", "Rare", "Common", "Crude"];
+  const containerOrder = ["skull", "chest", "pouch"];
+  const sections = containerOrder
+    .filter((c) => data.containers[c])
+    .map((chestType) => {
+      const c = data.containers[chestType];
+      const rows = order
+        .filter((r) => c.rarities[r])
+        .map((r) => {
+          const v = c.rarities[r];
+          const diffClass =
+            v.observed !== null && v.observed !== undefined && v.potco_baseline !== null && v.potco_baseline !== undefined
+              ? v.observed > v.potco_baseline * 1.5 ? "diff-higher" : v.observed < v.potco_baseline * 0.5 ? "diff-lower" : ""
+              : "";
+          return `
+            <tr>
+              <td class="rarity-${r}">${r}</td>
+              <td class="${diffClass}">${pct(v.observed)}</td>
+              <td>${pct(v.potco_baseline)}</td>
+            </tr>`;
+        })
+        .join("");
+      return `
+        <div class="container-rarity-block">
+          <div class="stat-row">${escapeHtml(chestType)} -- ${c.total_containers} opened</div>
+          <table>
+            <tr><th>Rarity</th><th>TLOPO observed</th><th>POTCO baseline</th></tr>
+            ${rows}
+          </table>
+        </div>`;
+    })
+    .join("");
+  return `
+    <div class="card">
+      <h2>${escapeHtml(title)}</h2>
+      <div class="tracking-note">${escapeHtml(note)}</div>
+      ${sections || '<p class="empty">No per-container rarity data yet</p>'}
+    </div>`;
+}
+
+function itemLink(name) {
+  return `<a href="/item_page/${encodeURIComponent(name)}">${escapeHtml(name)}</a>`;
+}
+
 function renderItems(data) {
   if (!data) return "";
-  const rows = data.items
-    .map((i) => `<tr><td class="rarity-${i.rarity}">${escapeHtml(i.name)}</td><td>${i.rarity || "-"}</td><td>${i.count}</td><td>${pct(i.rate_per_container)}</td></tr>`)
+  const known = data.items.filter((i) => i.rarity);
+  const misc = data.items.filter((i) => !i.rarity);
+  const rows = known
+    .map((i) => `<tr><td class="rarity-${i.rarity}">${itemLink(i.name)}</td><td class="rarity-${i.rarity}">${i.rarity}</td><td>${formatOdds(i.rate_per_container)}</td></tr>`)
     .join("");
+  const miscSection = renderMiscDetails(
+    misc,
+    (i) => `<tr><td>${itemLink(i.name)}</td><td>${formatOdds(i.rate_per_container)}</td></tr>`,
+    ["Item", "Drop Rate"]
+  );
   return `
     <div class="card">
       <h2>Item Drop Rates</h2>
       <table>
-        <tr><th>Item</th><th>Rarity</th><th>Count</th><th>Rate / container</th></tr>
-        ${rows || '<tr><td colspan="4" class="empty">No item data</td></tr>'}
+        <tr><th>Item</th><th>Rarity</th><th>Drop Rate</th></tr>
+        ${rows || (misc.length ? "" : '<tr><td colspan="3" class="empty">No item data</td></tr>')}
       </table>
+      ${miscSection}
     </div>`;
 }
 
 function renderLootTable(data) {
   if (!data) return "";
-  const rows = data.items
-    .map((i) => `<tr><td class="rarity-${i.rarity}">${escapeHtml(i.name)}</td><td class="rarity-${i.rarity}">${i.rarity || "-"}</td></tr>`)
+  const known = data.items.filter((i) => i.rarity);
+  const misc = data.items.filter((i) => !i.rarity);
+  const rows = known
+    .map((i) => `<tr><td class="rarity-${i.rarity}">${itemLink(i.name)}</td><td class="rarity-${i.rarity}">${i.rarity}</td></tr>`)
     .join("");
+  const miscSection = renderMiscDetails(
+    misc,
+    (i) => `<tr><td>${itemLink(i.name)}</td></tr>`,
+    ["Item"]
+  );
   return `
     <div class="card">
       <h2>Loot Table (what can drop)</h2>
       <table>
         <tr><th>Item</th><th>Rarity</th></tr>
-        ${rows || '<tr><td colspan="2" class="empty">Nothing recorded yet</td></tr>'}
+        ${rows || (misc.length ? "" : '<tr><td colspan="2" class="empty">Nothing recorded yet</td></tr>')}
       </table>
+      ${miscSection}
     </div>`;
 }
 
-loadEnemies();
+// Rarity-less entries (rarity is null -- the tracker saw the item but
+// never sampled a rarity color for it, e.g. gold or an unrecognized
+// name) would otherwise dilute every "read down the item list" table
+// with rows that carry no rarity signal at all. Collapsed by default
+// under a <details> so the primary table stays scannable; still fully
+// there for anyone who clicks it open.
+function renderMiscDetails(misc, rowFn, headers) {
+  if (!misc.length) return "";
+  const headerRow = `<tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr>`;
+  const rows = misc.map(rowFn).join("");
+  return `
+    <details class="misc-details">
+      <summary>Misc. (${misc.length} item${misc.length === 1 ? "" : "s"} with no known rarity)</summary>
+      <table>
+        ${headerRow}
+        ${rows}
+      </table>
+    </details>`;
+}
+
+async function initStatusLine() {
+  const [enemies, items] = await Promise.all([loadEnemies(), loadItems()]);
+  document.getElementById("status").textContent =
+    enemies.length ? `${enemies.length} enemies, ${items.length} items with data.` : "No data submitted yet.";
+}
+
+async function loadGlobalStats() {
+  const box = document.getElementById("global-stats");
+  try {
+    const res = await fetch("/global_stats");
+    if (!res.ok) { box.innerHTML = ""; return; }
+    const data = await res.json();
+    box.innerHTML = renderRarityByContainer(
+      { containers: data.containers },
+      {
+        title: "Site-Wide Macro Rates -- TLOPO vs. Original Base Game",
+        note: `Aggregated across every enemy/boss with data (${data.total_targets} targets, ${data.total_containers} containers total). One big rate per container type per rarity tier -- not broken down by item or target. See an individual boss's page below for its own numbers.`,
+      }
+    );
+  } catch (e) {
+    box.innerHTML = "";
+  }
+}
+
+loadGlobalStats();
+initStatusLine();
 </script>
 </body>
 </html>

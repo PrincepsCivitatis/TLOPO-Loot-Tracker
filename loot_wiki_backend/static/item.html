@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TLOPO Loot Wiki -- Item</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #20242b;
+    --panel: #262b33;
+    --fg: #e8e6df;
+    --grey: #9a9a9a;
+    --accent: #d8b25a;
+    --border: #3a4150;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    padding: 24px 16px 64px;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  .back-link {
+    display: inline-block;
+    color: var(--grey);
+    text-decoration: none;
+    font-size: 0.85rem;
+    margin-bottom: 16px;
+  }
+  .back-link:hover { color: var(--fg); }
+  .layout {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    gap: 20px;
+    align-items: start;
+  }
+  @media (max-width: 700px) {
+    .layout { grid-template-columns: 1fr; }
+  }
+  /* Infobox -- top-left summary card, same role as a traditional wiki's
+     item infobox: icon + at-a-glance facts, separate from the prose/
+     table content that follows. */
+  .infobox {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .infobox .icon-frame {
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    background: #15181d;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+  .infobox .icon-frame img { max-width: 100%; max-height: 100%; }
+  .infobox .icon-frame .no-icon { color: var(--grey); font-size: 0.75rem; text-align: center; padding: 8px; }
+  .infobox .item-name {
+    font-size: 1.1rem;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .infobox dl { margin: 12px 0 0; font-size: 0.85rem; }
+  .infobox dt { color: var(--grey); margin-top: 8px; }
+  .infobox dd { margin: 2px 0 0; }
+  .badge {
+    display: inline-block;
+    font-size: 0.7rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    color: var(--grey);
+  }
+  .badge.known { color: #6bbf6b; border-color: #6bbf6b; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin-bottom: 16px;
+  }
+  .card h2 { font-size: 1rem; color: var(--accent); margin: 0 0 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--grey); font-weight: 600; }
+  td a { color: var(--fg); text-decoration: none; }
+  td a:hover { color: var(--accent); text-decoration: underline; }
+  .rarity-Legendary { color: #E82020; }
+  .rarity-Famed { color: #2050E8; }
+  .rarity-Rare { color: #20C820; }
+  .rarity-Common { color: #E8D020; }
+  .rarity-Crude { color: #9A9A9A; }
+  .odds {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+    font-size: 0.85rem;
+  }
+  .odds-always { background: #7fd8d8; color: #12302f; }
+  .odds-common { background: #6fcf6f; color: #123412; }
+  .odds-uncommon { background: #e8d020; color: #2b2400; }
+  .odds-rare { background: #e8a13c; color: #2b1800; }
+  .odds-veryrare { background: #e85a5a; color: #2b0808; }
+  .empty { color: var(--grey); font-style: italic; }
+  .status { color: var(--grey); margin-top: 40px; text-align: center; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back-link" href="/">&larr; Back to search</a>
+  <div id="results"><p class="empty">Loading...</p></div>
+  <div class="status" id="status"></div>
+</div>
+
+<script>
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function pct(x) {
+  return x === null || x === undefined ? "-" : (x * 100).toFixed(2) + "%";
+}
+
+function formatOdds(rate) {
+  if (rate === null || rate === undefined) return `<span class="odds">-</span>`;
+  if (rate >= 0.999995) return `<span class="odds odds-always">Always</span>`;
+  const n = 1 / rate;
+  const text = "1/" + (n >= 100 ? Math.round(n).toLocaleString() : n.toFixed(1));
+  let cls;
+  if (n <= 50) cls = "odds-common";
+  else if (n <= 150) cls = "odds-uncommon";
+  else if (n <= 1500) cls = "odds-rare";
+  else cls = "odds-veryrare";
+  return `<span class="odds ${cls}">${text}</span>`;
+}
+
+// Best-effort local icon lookup -- the wiki backend doesn't host icon
+// files (see TLOPO_Icons on disk, not yet wired to a server), so this
+// only shows something if a future deploy adds an /icons static mount
+// with a name that happens to match. Missing icons fail silently to a
+// placeholder rather than a broken-image glyph.
+function iconUrl(name) {
+  return `/icons/${encodeURIComponent(name)}.png`;
+}
+
+async function loadItem() {
+  const params = new URLSearchParams(window.location.search);
+  const name = params.get("name") || decodeURIComponent(window.location.pathname.split("/").pop());
+  if (!name) {
+    document.getElementById("results").innerHTML = `<p class="empty">No item specified.</p>`;
+    return;
+  }
+
+  const res = await fetch(`/item/${encodeURIComponent(name)}`);
+  if (!res.ok) {
+    document.getElementById("results").innerHTML = `<p class="empty">No data recorded for "${escapeHtml(name)}" yet.</p>`;
+    return;
+  }
+  const data = await res.json();
+  render(data);
+}
+
+function render(data) {
+  const rarityClass = data.rarity ? `rarity-${data.rarity}` : "";
+  const sourceRows = data.sources
+    .map(
+      (s) => `
+      <tr>
+        <td><a href="/?target=${encodeURIComponent(s.target)}">${escapeHtml(s.target)}</a></td>
+        <td>${escapeHtml(s.chest_type)}</td>
+        <td>${formatOdds(s.rate_per_container)}</td>
+      </tr>`
+    )
+    .join("");
+
+  document.getElementById("results").innerHTML = `
+    <div class="layout">
+      <div class="infobox">
+        <div class="icon-frame">
+          <img src="${iconUrl(data.name)}" alt="" onerror="this.parentElement.innerHTML='<div class=&quot;no-icon&quot;>No icon linked yet</div>'">
+        </div>
+        <div class="item-name ${rarityClass}">${escapeHtml(data.name)}</div>
+        <span class="badge ${data.is_known_item ? "known" : ""}">${data.is_known_item ? "known item" : "self-learned"}</span>
+        <dl>
+          <dt>Rarity</dt>
+          <dd class="${rarityClass}">${data.rarity || "Unknown"}</dd>
+          <dt>Total times seen</dt>
+          <dd>${data.total_seen}</dd>
+          <dt>Sources</dt>
+          <dd>${data.sources.length} target(s)</dd>
+        </dl>
+      </div>
+      <div>
+        <div class="card">
+          <h2>Sources</h2>
+          <table>
+            <tr><th>Target</th><th>Container</th><th>Drop Rate</th></tr>
+            ${sourceRows || '<tr><td colspan="3" class="empty">No sources recorded</td></tr>'}
+          </table>
+        </div>
+      </div>
+    </div>`;
+}
+
+loadItem();
+</script>
+</body>
+</html>
