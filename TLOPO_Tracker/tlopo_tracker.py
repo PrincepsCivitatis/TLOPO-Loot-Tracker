@@ -31,9 +31,10 @@ from loot_parser import (
     DEFAULT_HSV_TARGETS, HSV_TARGETS_VERSION, KNOWN_BOSS_NAMES,
 )
 from session import Session
-from exporter import export_to_excel, export_to_text, default_export_folder
+from exporter import export_to_excel, export_to_text, export_to_sqlite, default_export_folder
 from detector import LootDetector, DetectorSettings, DEFAULT_PARCHMENT_RGB, DEFAULT_PARCHMENT_TOLERANCE
-from loot_wiki_client import ensure_anon_id, submit_chest_async
+from kraken_ledger_client import ensure_research_db_anon_id, submit_batch_async
+from enrichment import enrich_events
 
 APP_TITLE = "TLOPO Loot Tracker"
 WINDOW_W, WINDOW_H = 440, 750
@@ -114,12 +115,6 @@ class TLOPOTrackerApp:
 
         self.app_dir = os.path.dirname(os.path.abspath(__file__))
         self.settings = self._load_settings()
-        # target -> kill count as of the last loot-wiki submission for it
-        # (see _maybe_submit_to_loot_wiki). In-memory/session-scoped only,
-        # not persisted -- worst case after a restart is one slightly
-        # oversized delta on the next chest for a target, not a
-        # correctness problem for aggregate rates.
-        self._loot_wiki_kill_baseline = {}
 
         self.detector: LootDetector = None
         self._detector_started = False
@@ -187,17 +182,22 @@ class TLOPOTrackerApp:
             "parchment_rgb": list(DEFAULT_PARCHMENT_RGB),
             "parchment_tolerance": DEFAULT_PARCHMENT_TOLERANCE,
             "export_folder": default_export_folder(),
-            # Opt-in, anonymized loot-data sharing for community drop-rate
-            # research -- opt_in stays OFF by default (privacy-first: no
-            # data is ever sent without the player explicitly checking the
-            # box themselves), but the endpoint is prefilled with the
-            # project's own hosted backend so turning it on is a single
-            # click, not a URL to track down and type in. loot_wiki_anon_id
-            # is a random UUID generated on first opt-in (see
-            # loot_wiki_client.ensure_anon_id), never tied to a name/account.
-            "loot_wiki_opt_in": False,
-            "loot_wiki_endpoint": "http://100.56.135.187:8000",
-            "loot_wiki_anon_id": "",
+            # Opt-in, anonymized submission of this session's full research-
+            # observation stream (see enrichment.enrich_events) to Kraken's
+            # Ledger (see kraken_ledger_backend/) -- opt_in stays OFF by
+            # default (privacy-first: no data is ever sent without the
+            # player explicitly checking the box themselves), but the
+            # endpoint is prefilled with the project's own hosted backend
+            # so turning it on is a single click. research_db_anon_id is a
+            # random UUID generated on first opt-in, never tied to a
+            # name/account. main-debug deliberately does NOT have the
+            # loot-wiki sharing feature main/experimental-alpha have --
+            # different purpose (static per-item drop-rate stats vs. this
+            # branch's richer per-kill/per-loot research stream), kept
+            # separate so the two datasets are never mixed.
+            "research_db_opt_in": False,
+            "research_db_endpoint": "http://100.56.135.187:8100",
+            "research_db_anon_id": "",
         }
         path = self._settings_path()
         if os.path.exists(path):
@@ -328,9 +328,44 @@ class TLOPOTrackerApp:
 
         self.active_target_label = Label(frame, text="Farming: (none selected)", bg=PANEL_BG,
                                           fg=ACCENT, font=("Segoe UI", 10, "bold"))
-        self.active_target_label.grid(row=3, column=0, columnspan=2, sticky=W, padx=6, pady=(4, 8))
+        self.active_target_label.grid(row=3, column=0, columnspan=2, sticky=W, padx=6, pady=(4, 0))
+
+        # Enemy color/tier and location -- both optional, manually typed.
+        # No on-screen indicator for either has been confirmed against a
+        # real screenshot yet, so there's no auto-detection to wire up
+        # (see loot_parser.ChestResult.enemy_color/.location); these just
+        # get carried onto every chest/kill event logged while set, same
+        # as `target`. Left blank by default -- never required to farm.
+        Label(frame, text="Enemy Color/Tier (optional):", bg=PANEL_BG, fg=GREY,
+              font=("Segoe UI", 8)).grid(row=4, column=0, columnspan=2, sticky=W, padx=6, pady=(6, 0))
+        self.enemy_color_var = StringVar(value=self.session.active_enemy_color or "")
+        self.enemy_color_combo = ttk.Combobox(
+            frame, textvariable=self.enemy_color_var,
+            values=["", "Red", "Yellow", "Elite", "Normal"], width=26,
+        )
+        self.enemy_color_combo.grid(row=5, column=0, sticky=W, padx=6)
+        self.enemy_color_combo.bind("<<ComboboxSelected>>", self._on_enemy_color_change)
+        self.enemy_color_combo.bind("<FocusOut>", self._on_enemy_color_change)
+
+        Label(frame, text="Location (optional):", bg=PANEL_BG, fg=GREY,
+              font=("Segoe UI", 8)).grid(row=6, column=0, columnspan=2, sticky=W, padx=6, pady=(6, 0))
+        self.location_var = StringVar(value=self.session.active_location or "")
+        location_values = [self.session.active_location] if self.session.active_location else []
+        self.location_combo = ttk.Combobox(frame, textvariable=self.location_var, values=location_values, width=26)
+        self.location_combo.grid(row=7, column=0, sticky=W, padx=6, pady=(0, 8))
+        self.location_combo.bind("<<ComboboxSelected>>", self._on_location_change)
+        self.location_combo.bind("<FocusOut>", self._on_location_change)
 
         self._target_frame = frame
+
+    def _on_enemy_color_change(self, _evt=None):
+        self.session.set_enemy_color(self.enemy_color_var.get())
+
+    def _on_location_change(self, _evt=None):
+        value = self.location_var.get().strip()
+        self.session.set_location(value)
+        if value and value not in self.location_combo["values"]:
+            self.location_combo["values"] = list(self.location_combo["values"]) + [value]
 
     def _on_target_combo_change(self, _evt=None):
         if self.target_var.get() == "Custom...":
@@ -483,6 +518,8 @@ class TLOPOTrackerApp:
                relief="flat", cursor="hand2").pack(side=LEFT, expand=True, fill=X, padx=2)
         Button(row1, text="Export to Text", command=self._on_export_text, bg="#455a64", fg="white",
                relief="flat", cursor="hand2").pack(side=LEFT, expand=True, fill=X, padx=2)
+        Button(row1, text="Export to SQLite", command=self._on_export_sqlite, bg="#5c4a99", fg="white",
+               relief="flat", cursor="hand2").pack(side=LEFT, expand=True, fill=X, padx=2)
 
         row2 = Frame(frame, bg=BG)
         row2.pack(fill=X, pady=2)
@@ -546,8 +583,34 @@ class TLOPOTrackerApp:
         if now - self._last_autosave > 60:
             self._last_autosave = now
             threading.Thread(target=self._autosave_async, daemon=True).start()
+            self._maybe_submit_to_research_db()
 
         self.root.after(200, self._tick_ui)
+
+    def _maybe_submit_to_research_db(self):
+        """
+        Fires an anonymized full-session submission to Kraken's Ledger
+        (see kraken_ledger_client.py) on the same 60s cadence as
+        autosave, if the player has opted in and set an endpoint. A
+        completely separate opt-in/feature from the loot-wiki sharing
+        above -- see kraken_ledger_client.py's module docstring for why
+        it uses its own anon_id.
+        """
+        if not self.settings.get("research_db_opt_in"):
+            return
+        endpoint = self.settings.get("research_db_endpoint", "").strip()
+        if not endpoint:
+            return
+
+        anon_id = ensure_research_db_anon_id(self.settings)
+        events = enrich_events(self.session)
+        submit_batch_async(
+            endpoint=endpoint,
+            anon_id=anon_id,
+            session_id=self.session.session_id,
+            session_start=self.session.session_start,
+            events=events,
+        )
 
     def _autosave_async(self):
         try:
@@ -573,77 +636,37 @@ class TLOPOTrackerApp:
 
         if not result.target:
             result.target = self.session.active_target or "Unknown"
+        result.enemy_color = self.session.active_enemy_color
+        result.location = self.session.active_location
         named_hits = self.session.log_chest(result)
 
         self._append_loot_log_row(result)
         self._flash_ui()
         self._refresh_all()
-        self._maybe_submit_to_loot_wiki(result)
 
         for item in named_hits:
             if item.rarity == "Legendary":
                 self._show_legendary_alert(item.name)
 
-    def _maybe_submit_to_loot_wiki(self, result: ChestResult):
-        """
-        Fires an anonymized loot-wiki submission for this chest if the
-        user has opted in and set an endpoint (see Settings). Only the
-        initial/provisional log triggers a submission, not a later
-        amendment for the same chest (see _handle_chest_amended) -- an
-        amendment is late-arriving content for a chest ALREADY counted
-        here, and submitting it again would inflate the wiki's chest
-        count for this target without a matching second real chest.
-
-        Submits kills SINCE THE LAST container for this target (a
-        delta), not the session's cumulative kill count -- see
-        loot_wiki_client.submit_chest_async's docstring for why a
-        cumulative count doesn't aggregate correctly across many
-        contributors' sessions. self._loot_wiki_kill_baseline tracks
-        the kill count as of the last submission, per target, so this
-        can compute that delta locally.
-
-        Also tags whether this target's kills are coming from the
-        reliable auto-detector or from manual +1/+5/+10 clicks (see
-        loot_wiki_client.submit_chest_async's docstring on
-        `kill_tracking` -- undercounted manual kills silently inflate
-        every drop rate, since kills are the denominator).
-        """
-        if not self.settings.get("loot_wiki_opt_in"):
-            return
-        endpoint = self.settings.get("loot_wiki_endpoint", "").strip()
-        if not endpoint:
-            return
-
-        anon_id = ensure_anon_id(self.settings)
-        stats = self.session.get_active_stats()
-        current_kills = stats.kills if stats else 0
-        baseline = self._loot_wiki_kill_baseline.get(result.target, 0)
-        kills_since_last = max(0, current_kills - baseline)
-        self._loot_wiki_kill_baseline[result.target] = current_kills
-        kill_tracking = "auto" if (stats and stats.auto_kills > 0) else "manual"
-
-        submit_chest_async(
-            endpoint=endpoint,
-            anon_id=anon_id,
-            target=result.target,
-            chest_type=result.chest_key(),
-            items=[{"name": i.name, "rarity": i.rarity} for i in result.items],
-            gold=result.gold,
-            kills_since_last_container=kills_since_last,
-            skull_chest_number=stats.skull_chests if stats else None,
-            kill_tracking=kill_tracking,
-        )
-
     def _handle_auto_kill_detected(self):
         """
         Boss health-bar auto-detector confirmed a kill (detector.py
-        LootDetector.on_kill_detected). Silently no-ops if no target is
-        set yet -- unlike the manual +1 button, there's no user action
-        here to attach a warning dialog to.
+        LootDetector.on_kill_detected). No-ops if no target is set yet --
+        unlike the manual +1 button, there's no user action here to
+        attach a warning dialog to -- but this is logged rather than
+        silent (see the diagnostic print below) since a dropped auto-kill
+        with no trace at all was hard to distinguish from "detector never
+        confirmed a kill in the first place" when debugging kill-count
+        mismatches.
         """
         if self.session.active_target is None:
+            print("[TLOPO tracker] auto-kill detected but no active target is set -- dropped", flush=True)
             return
+        before = self.session.get_active_stats().kills if self.session.get_active_stats() else 0
         self.session.add_auto_kill()
+        after = self.session.get_active_stats().kills if self.session.get_active_stats() else 0
+        print(f"[TLOPO tracker] auto-kill credited to {self.session.active_target!r}: "
+              f"{before} -> {after}", flush=True)
         self._refresh_all()
 
     def _handle_auto_target_detected(self, name: str):
@@ -657,7 +680,11 @@ class TLOPOTrackerApp:
         stays in effect until the next fresh encounter is auto-detected.
         """
         if name not in PRESET_TARGETS:
+            print(f"[TLOPO tracker] auto-detected target {name!r} is not in PRESET_TARGETS -- "
+                  f"ignored (target NOT switched)", flush=True)
             return
+        print(f"[TLOPO tracker] auto-switching active target to {name!r} "
+              f"(was {self.session.active_target!r})", flush=True)
         self.target_var.set(name)
         self._on_target_combo_change()
         self.session.set_target(name)
@@ -700,17 +727,23 @@ class TLOPOTrackerApp:
             return
 
         for item in display_items:
+            # Confidence suffix (e.g. ", 97%") is appended inside the
+            # existing parenthetical tag when known, rather than hidden --
+            # same "don't hide OCR failures/uncertainty" philosophy as
+            # "(no items read)" below.
+            conf_suffix = f", {item.name_confidence:.0f}%" if item.name_confidence is not None else ""
             if item.rarity == "Legendary":
-                self.loot_text.insert(END, f"★ {item.name} (Legendary) ", "Legendary_row")
+                self.loot_text.insert(END, f"★ {item.name} (Legendary{conf_suffix}) ", "Legendary_row")
             elif item.rarity == "Famed":
-                self.loot_text.insert(END, f"{item.name} (Famed) ", "Famed_bold")
+                self.loot_text.insert(END, f"{item.name} (Famed{conf_suffix}) ", "Famed_bold")
             elif item.rarity is None:
                 # Untagged currency/filler item (Gold, gems, playing
                 # cards) -- real loot, just not rarity-colored in-game,
                 # so no parenthetical tag or rarity-specific coloring.
-                self.loot_text.insert(END, f"{item.name} ", "meta")
+                suffix = f" ({item.name_confidence:.0f}%)" if item.name_confidence is not None else ""
+                self.loot_text.insert(END, f"{item.name}{suffix} ", "meta")
             else:
-                self.loot_text.insert(END, f"{item.name} ({item.rarity}) ", item.rarity)
+                self.loot_text.insert(END, f"{item.name} ({item.rarity}{conf_suffix}) ", item.rarity)
 
     def _append_loot_log_row(self, result: ChestResult):
         self.loot_text.configure(state=NORMAL)
@@ -828,6 +861,13 @@ class TLOPOTrackerApp:
             messagebox.showinfo(APP_TITLE, f"Text file saved:\n{path}")
         except Exception as e:
             messagebox.showerror(APP_TITLE, f"Failed to export text file:\n{e}")
+
+    def _on_export_sqlite(self):
+        try:
+            path = export_to_sqlite(self.session, self.settings.get("export_folder"))
+            messagebox.showinfo(APP_TITLE, f"SQLite database saved:\n{path}")
+        except Exception as e:
+            messagebox.showerror(APP_TITLE, f"Failed to export SQLite database:\n{e}")
 
     def _on_new_target(self):
         self.target_combo.focus_set()
@@ -968,22 +1008,23 @@ class TLOPOTrackerApp:
         folder_var = StringVar(value=self.settings.get("export_folder", default_export_folder()))
         Entry(parent, textvariable=folder_var, width=48).pack(padx=10, pady=(0, 16))
 
-        Label(parent, text="Community Drop-Rate Data Sharing (Opt-In)", bg=BG, fg=FG,
+        Label(parent, text="Research Database Sharing -- Kraken's Ledger (Opt-In)", bg=BG, fg=FG,
               font=("Segoe UI", 9, "bold")).pack(anchor=W, padx=10, pady=(4, 2))
-        Label(parent, text="Off by default. If enabled, every chest you loot sends an\n"
-                            "anonymized record (target, chest type, items + rarity, gold,\n"
-                            "and your kill/skull-chest count at the time) to the endpoint\n"
-                            "below, to help estimate real drop rates. No player, character,\n"
-                            "or account info is ever sent -- only a random ID generated once\n"
+        Label(parent, text="Off by default. If enabled, your session's full research\n"
+                            "observation stream (every kill and loot event, with\n"
+                            "confidence/category/capture-quality detail) is sent to\n"
+                            "Kraken's Ledger every ~60s while farming, to help build a\n"
+                            "larger shared research dataset. No player, character, or\n"
+                            "account info is ever sent -- only a random ID generated once\n"
                             "for this install, so submissions can be told apart in aggregate\n"
                             "without identifying you. Leave the endpoint blank to keep this\n"
                             "fully off even if checked.",
               bg=BG, fg=GREY, justify=LEFT, font=("Segoe UI", 8)).pack(anchor=W, padx=10)
-        loot_wiki_opt_in_var = BooleanVar(value=self.settings.get("loot_wiki_opt_in", False))
-        Checkbutton(parent, text="Share anonymized loot data", variable=loot_wiki_opt_in_var,
+        research_db_opt_in_var = BooleanVar(value=self.settings.get("research_db_opt_in", False))
+        Checkbutton(parent, text="Share research observation data", variable=research_db_opt_in_var,
                     bg=BG, fg=FG, selectcolor=PANEL_BG, activebackground=BG).pack(anchor=W, padx=10, pady=(4, 0))
-        loot_wiki_endpoint_var = StringVar(value=self.settings.get("loot_wiki_endpoint", ""))
-        Entry(parent, textvariable=loot_wiki_endpoint_var, width=48).pack(padx=10, pady=(2, 16))
+        research_db_endpoint_var = StringVar(value=self.settings.get("research_db_endpoint", ""))
+        Entry(parent, textvariable=research_db_endpoint_var, width=48).pack(padx=10, pady=(2, 16))
 
         def save_and_close():
             try:
@@ -1021,10 +1062,10 @@ class TLOPOTrackerApp:
             self.settings["hide_crude"] = hide_crude_var.get()
             self.settings["hide_common"] = hide_common_var.get()
             self.settings["export_folder"] = folder_var.get().strip() or default_export_folder()
-            self.settings["loot_wiki_opt_in"] = loot_wiki_opt_in_var.get()
-            self.settings["loot_wiki_endpoint"] = loot_wiki_endpoint_var.get().strip()
-            if self.settings["loot_wiki_opt_in"]:
-                ensure_anon_id(self.settings)
+            self.settings["research_db_opt_in"] = research_db_opt_in_var.get()
+            self.settings["research_db_endpoint"] = research_db_endpoint_var.get().strip()
+            if self.settings["research_db_opt_in"]:
+                ensure_research_db_anon_id(self.settings)
             for rarity in RARITY_ORDER:
                 hsv_targets.setdefault(rarity, {})
                 hsv_targets[rarity]["h"] = hue_vars[rarity].get()

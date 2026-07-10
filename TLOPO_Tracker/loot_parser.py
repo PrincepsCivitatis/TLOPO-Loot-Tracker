@@ -11,7 +11,7 @@ import colorsys
 import difflib
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +161,158 @@ def normalize_chest_type(ocr_title_text: str) -> Optional[str]:
     return None
 
 
+# Keyword -> category, checked as whole-word matches against the item
+# name (longest keyword wins on overlap, e.g. "Throwing Knives" over
+# "Knives" alone). Same substring/keyword-matching philosophy as
+# normalize_chest_type above -- not an exhaustive TLOPO item taxonomy
+# (no such list is available in this repo), just enough coverage over
+# common gear-name words to be useful for "does X drop more legendary
+# swords than Y"-style aggregate questions. Names that match nothing
+# stay uncategorized (category=None) rather than being force-fit into
+# a wrong bucket.
+ITEM_CATEGORY_KEYWORDS = [
+    ("Throwing Knives", "Throwing Knives"),
+    ("Blunderbuss", "Blunderbuss"),
+    ("Broadsword", "Sword"),
+    ("Cutlass", "Sword"),
+    ("Sabre", "Sword"),
+    ("Rapier", "Sword"),
+    ("Sword", "Sword"),
+    ("Dagger", "Dagger"),
+    ("Repeater", "Gun"),
+    ("Pistol", "Gun"),
+    ("Musket", "Gun"),
+    ("Boots", "Boots"),
+    ("Shoes", "Boots"),
+    ("Sandals", "Boots"),
+    ("Hat", "Hat"),
+    ("Bandana", "Hat"),
+    ("Tricorne", "Hat"),
+    ("Coat", "Coat"),
+    ("Jacket", "Coat"),
+    ("Vest", "Shirt"),
+    ("Shirt", "Shirt"),
+    ("Blouse", "Shirt"),
+    ("Top", "Shirt"),
+    ("Trousers", "Pants"),
+    ("Breeches", "Pants"),
+    ("Capris", "Pants"),
+    ("Shorts", "Pants"),
+    ("Skirt", "Pants"),
+    ("Ring", "Ring"),
+    ("Charm", "Charm"),
+    ("Necklace", "Necklace"),
+    ("Earring", "Earring"),
+    ("Tattoo", "Tattoo"),
+    ("Doll", "Doll"),
+    ("Spyglass", "Spyglass"),
+    ("Staff", "Staff"),
+    # Added from real session data (TLOPO_Session_2026-07-09_23-13) --
+    # "Miracle Water" and "Faded Sea Chart" were seen uncategorized.
+    ("Elixir", "Elixir"),
+    ("Tonic", "Elixir"),
+    ("Potion", "Elixir"),
+    ("Water", "Elixir"),
+    ("Chart", "Chart"),
+    ("Map", "Chart"),
+]
+
+# Coarse, fixed vocabulary that the many granular categories above
+# collapse into for cross-category analysis (e.g. "weapon drop rate"
+# across every sword/dagger/gun rather than one at a time). The granular
+# `category` field is kept as-is, not replaced -- collapsing straight to
+# this vocabulary would lose exactly the distinction needed for a
+# question like "does X drop more legendary swords than Y" (see
+# category_group() below, which adds a second, coarser field alongside
+# the granular one instead). "Quest Item" has no granular category
+# mapped to it yet -- no evidence for one has shown up in real session
+# data so far; it's a valid value here, just unused until one does.
+CATEGORY_GROUP: Dict[str, str] = {
+    "Sword": "Weapon", "Dagger": "Weapon", "Gun": "Weapon",
+    "Throwing Knives": "Weapon", "Blunderbuss": "Weapon", "Staff": "Weapon",
+    "Boots": "Clothing", "Hat": "Clothing", "Coat": "Clothing",
+    "Shirt": "Clothing", "Pants": "Clothing",
+    "Ring": "Accessory", "Charm": "Accessory", "Necklace": "Accessory",
+    "Earring": "Accessory", "Tattoo": "Accessory",
+    "Doll": "Collectible", "Spyglass": "Collectible",
+    "Elixir": "Consumable",
+    "Chart": "Treasure",
+}
+
+
+def category_group(category: Optional[str]) -> Optional[str]:
+    """Fixed-vocabulary group for a granular category (see CATEGORY_GROUP). None passthrough."""
+    if category is None:
+        return None
+    return CATEGORY_GROUP.get(category)
+
+
+def canonical_enemy_id(display_name: str) -> str:
+    """
+    Deterministic, stable machine-readable ID for an enemy display name --
+    lowercase, non-alphanumerics collapsed to a single underscore, e.g.
+    "General Hex" -> "general_hex". Exists so a database join (see
+    enrichment.py) has something stable to key on even if a display name
+    ever gets a spelling/formatting tweak later.
+
+    Pure slug of the display name, not a hand-curated ID table -- this
+    repo has no such table. If a specific enemy ever needs a hand-picked
+    ID that doesn't match its slug (the way a real reference database
+    might, e.g. "capt_briney_palifico" instead of "palifico"), that's a
+    small lookup dict to add here later, not a reason to block on one now.
+    """
+    if not display_name:
+        return ""
+    slug = re.sub(r"[^a-z0-9]+", "_", display_name.strip().lower())
+    return slug.strip("_")
+
+
+def classify_item_category(name: str) -> Optional[str]:
+    """
+    Coarse item-type tag from a keyword scan over the item name (see
+    ITEM_CATEGORY_KEYWORDS). Returns None if nothing matched -- a
+    non-match is expected and fine (currency/filler items like "Gold"
+    or playing cards, or gear words not yet in the keyword list).
+    """
+    if not name:
+        return None
+    best_category, best_len = None, -1
+    for keyword, category in ITEM_CATEGORY_KEYWORDS:
+        if re.search(r"(?i)\b" + re.escape(keyword) + r"\b", name):
+            if len(keyword) > best_len:
+                best_category, best_len = category, len(keyword)
+    return best_category
+
+
+# Buckets over LootItem.name_confidence (0-100) so a research consumer can
+# weight/filter observations without discarding low-confidence reads
+# outright -- see the "don't hide OCR failures" philosophy this module
+# already follows elsewhere (untagged items, "(no items read)"). Cutoffs
+# are the collaborator's own requested bands, not independently tuned.
+CONFIDENCE_TIER_THRESHOLDS = [
+    (95.0, "High Confidence"),
+    (85.0, "Good"),
+    (70.0, "Needs Review"),
+]
+CONFIDENCE_TIER_FLAG = "Flag"
+
+
+def confidence_tier(name_confidence: Optional[float]) -> Optional[str]:
+    """
+    Coarse trust bucket for an OCR confidence score -- see
+    CONFIDENCE_TIER_THRESHOLDS. Returns None (not "Flag") when
+    name_confidence itself is None, since "unknown confidence" and
+    "known to be low confidence" are different things a consumer should
+    be able to tell apart.
+    """
+    if name_confidence is None:
+        return None
+    for threshold, tier in CONFIDENCE_TIER_THRESHOLDS:
+        if name_confidence >= threshold:
+            return tier
+    return CONFIDENCE_TIER_FLAG
+
+
 def clean_item_name(raw_text: str) -> str:
     """Clean up an OCR'd item-name line: strip stray symbols, collapse spaces."""
     if not raw_text:
@@ -192,9 +344,37 @@ class LootItem:
     # currency/filler items (Gold, gems, playing cards) that the game
     # renders with no rarity color but which are still real loot worth
     # tracking.
+    # OCR confidence (0-100) for the name text, from EasyOCR's own
+    # per-detection confidence score -- see detector.py _read_loot_window.
+    # None if this item wasn't produced by OCR (e.g. constructed in a
+    # test or restored from an older save with no confidence recorded).
+    name_confidence: Optional[float] = None
+    # Coarse item-type tag (Boots/Sword/Ring/...) from
+    # classify_item_category below. None if the name didn't match any
+    # known category keyword -- kept as None rather than hidden, same
+    # "don't hide OCR failures" philosophy as "(no items read)".
+    category: Optional[str] = None
 
     def is_named_tier(self) -> bool:
         return self.rarity in ("Famed", "Legendary")
+
+
+# Capture-quality classification for a loot/chest observation (see
+# session.py Session.log_chest). Deliberately conservative: "Partial" is
+# the default for anything with an unreadable confidence, since treating
+# an unknown-confidence read as trustworthy would silently overstate data
+# quality to a later statistical consumer. "OCR Failure" is reserved for
+# a chest that was genuinely confirmed open (we have its chest_type) but
+# came back with literally nothing legible -- distinct from a kill that
+# never produced a loot popup at all (TLOPO has no guaranteed drop; see
+# enrichment.py's "Missed" kill classification, a different concept).
+def classify_capture_quality(items: List["LootItem"], gold: int) -> str:
+    if not items and not gold:
+        return "OCR Failure"
+    for item in items:
+        if item.name_confidence is None or item.name_confidence < 70.0:
+            return "Partial"
+    return "Complete"
 
 
 @dataclass
@@ -215,6 +395,14 @@ class ChestResult:
     # a brand new chest. When True, `items`/`gold` hold only what's NEW
     # since the original log, not the chest's full contents.
     is_amendment: bool = False
+    # Copied in from Session.active_enemy_color / active_location at log
+    # time, same way `target` already is -- both are manually set by the
+    # player (see tlopo_tracker.py), not auto-detected. No on-screen
+    # element for either has been confirmed/calibrated yet (no reference
+    # screenshot showing an enemy color-tier indicator or a location HUD),
+    # so these stay manual-entry only until one exists.
+    enemy_color: Optional[str] = None
+    location: Optional[str] = None
     # "small" (Take Small Items showing) / "all" (Take It All showing) /
     # None (button not read this frame) -- internal signal only, used to
     # detect a chest reopening in the same spot without ever properly

@@ -23,6 +23,7 @@ import numpy as np
 from loot_parser import (
     ChestResult,
     LootItem,
+    classify_item_category,
     classify_rarity_from_rgb,
     clean_item_name,
     match_known_boss_name,
@@ -161,6 +162,56 @@ MIN_REGION_FRACTION = 0.01  # candidate region must cover at least 1% of screen 
 # popup gets re-detected as a "new" one a moment later and double-logged.
 ABSENCE_CONFIRM_SECONDS = 0.6
 
+# ------------------------------------------------------------------
+# Item detail-card scanning (Attack/weapon skill/boosts/level
+# requirement -- see loot_wiki_backend's /submit_item_stats). Reuses
+# the same parchment-blob detection as the loot popup, since the card
+# is built from the same tan parchment GUI texture (see gui_card_detail
+# in the extracted TLOPO_Icons set) -- but tracked as a fully separate
+# state machine from the loot-window one, since a player can have an
+# item detail card open independent of any chest being open.
+#
+# CALIBRATION NOTE: MIN_REGION_FRACTION above was tuned against real
+# loot-popup screenshots over several iterations (see README's
+# "IF SOMETHING ISN'T WORKING" section). This card is a visually
+# different size/shape/position (see the reference screenshot: a
+# tall, narrow card rather than the loot popup's wide rectangle), so
+# ITEM_CARD_MIN_REGION_FRACTION and ITEM_CARD_MIN_ASPECT_RATIO below
+# are a first-pass estimate, not yet confirmed against a real capture
+# -- expect these to need the same real-screenshot tuning pass the
+# other detectors went through before this reliably triggers in game.
+ITEM_CARD_MIN_REGION_FRACTION = 0.02
+# Loot popups are wide rectangles (width >> height); this card is the
+# opposite (tall, narrow) per the reference screenshot -- so unlike
+# HEALTH_BAR_MIN_ASPECT_RATIO/other width/height checks in this file,
+# this bounds the INVERSE ratio (height / width).
+ITEM_CARD_MIN_HEIGHT_TO_WIDTH_RATIO = 1.3
+# Same debounce rationale as ABSENCE_CONFIRM_SECONDS -- avoids
+# re-scanning the same still-open card every poll.
+ITEM_CARD_RESCAN_COOLDOWN_S = 2.0
+
+# Regexes for pulling fields out of the card's whole-window OCR text
+# (matched line-by-line against _ocr_lines_with_boxes output, same
+# general approach _read_loot_window already uses for the chest popup
+# rather than fixed pixel sub-regions -- more tolerant of the card's
+# exact layout shifting slightly between item types). Written against
+# the one reference screenshot available so far (a weapon card reading
+# "Attack: 108", "Leviathan's Curse" / "Rank 5" / "(Weapon Skill)",
+# "Parry Boost +5" / "Brawl Boost +5" / "Endurance Boost +5",
+# "Requires Level 30 Sword") -- NOT yet confirmed against multiple real
+# cards or non-weapon item types (clothing/jewelry/consumables likely
+# have a different stat layout entirely, e.g. no Attack/weapon skill at
+# all), so treat these as a starting point to refine once more sample
+# screenshots are available.
+ITEM_CARD_ATTACK_RE = re.compile(r"(?i)\battack\s*[:\-]?\s*(\d{1,5})\b")
+ITEM_CARD_SKILL_RANK_RE = re.compile(r"(?i)\brank\s*(\d{1,2})\b")
+ITEM_CARD_LEVEL_REQ_RE = re.compile(r"(?i)requires\s+level\s*(\d{1,3})")
+ITEM_CARD_BOOST_RE = re.compile(r"(?i)\b([A-Za-z]+)\s*Boost\s*\+?\s*(\d{1,3})\b")
+# The skill name itself has no distinguishing regex pattern of its own
+# -- it's whatever text line sits directly above a line matching
+# ITEM_CARD_SKILL_RANK_RE, resolved positionally in
+# _parse_item_stat_card rather than matched here.
+
 # While a loot window's popup is being tracked as open (a "session" --
 # see LootDetector._start_session/_accumulate_session/_finalize_session),
 # it gets re-OCR'd on this cadence and merged into a running record of
@@ -297,16 +348,6 @@ HEALTH_TRACK_EXTEND_MAX_FACTOR = 6.0
 # screen (see _expand_bar_rows's docstring).
 HEALTH_BAR_ROW_EXPAND_MAX_FACTOR = 3.0
 
-# Once a bar is being tracked, _health_bar_density checks fill+track
-# pixel density within the bar's already-known (fixed) box to decide if
-# it's still genuinely on screen, rather than re-running the fresh-
-# detection search every poll -- same "cheap lenient check while
-# tracking, strict search only for a NEW window" split _region_still_
-# present uses for the loot popup. This is the density (fill+track
-# pixels / box area) below which the box is considered to no longer
-# show a real bar.
-HEALTH_BAR_PRESENCE_DENSITY = 0.3
-
 # The bar must show zero fill, OR disappear outright, for this many
 # CONSECUTIVE seconds before a kill is confirmed -- same debounce
 # rationale as ABSENCE_CONFIRM_SECONDS. Whether TLOPO actually drains the
@@ -316,6 +357,16 @@ HEALTH_BAR_PRESENCE_DENSITY = 0.3
 # double-counting if the bar reappears a moment later (e.g. a multi-phase
 # boss).
 HEALTH_DEFEATED_CONFIRM_SECONDS = 1.0
+
+# A tracked bar can also disappear because the PLAYER died or otherwise
+# lost the encounter (defeat/respawn screen, boss un-aggros, player sails
+# off) with the boss still very much alive -- confirmed via real play:
+# a boss brought down to "red" but not finished, followed by the player
+# dying, made the bar vanish and was wrongly counted as a kill. Outright
+# disappearance is now only trusted as a kill if the last known fill
+# fraction before it vanished was already near zero; anything higher is
+# treated as the target being lost, not defeated.
+HEALTH_BAR_DISAPPEAR_MAX_FRACTION = 0.05
 
 # The boss nameplate ("Name LV##") sits directly ABOVE the health bar,
 # same cluster as the circular emblem icon to its left (confirmed from
@@ -361,6 +412,8 @@ class LootDetector:
         settings: Optional[DetectorSettings] = None,
         on_kill_detected: Optional[Callable[[], None]] = None,
         on_target_detected: Optional[Callable[[str], None]] = None,
+        on_item_stats_detected: Optional[Callable[[dict], None]] = None,
+        is_item_confirmed: Optional[Callable[[str], bool]] = None,
     ):
         self.on_chest_detected = on_chest_detected
         self.on_status_change = on_status_change
@@ -380,6 +433,24 @@ class LootDetector:
         # The GUI is still expected to let the player override this
         # manually at any time (see GitHub issue #7's auto-target design).
         self.on_target_detected = on_target_detected
+        # Fired once per successfully-OCR'd item detail card (see
+        # _scan_item_stat_card) with a dict of whatever fields were read
+        # (attack/weapon_skill_name/weapon_skill_rank/boosts/
+        # level_requirement/gold_value -- any of which may be missing if
+        # that field wasn't present on this particular item's card or
+        # didn't OCR cleanly). The caller is expected to submit this via
+        # loot_wiki_client.submit_item_stats_async; kept as a separate
+        # callback from on_chest_detected since this has nothing to do
+        # with loot popups.
+        self.on_item_stats_detected = on_item_stats_detected
+        # Cheap pre-check called with a freshly-read item name BEFORE
+        # committing to the (much more expensive) full stat-card OCR
+        # pass -- lets the caller wire in
+        # loot_wiki_client.ConfirmedItemsCache.is_confirmed so an item
+        # the community has already confirmed never gets scanned again.
+        # Optional: if not provided, every detected card gets OCR'd
+        # regardless (fine for e.g. testing, just wasteful in normal use).
+        self.is_item_confirmed = is_item_confirmed
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -393,6 +464,7 @@ class LootDetector:
         self._cooldown_until = 0.0
         self._first_absent_at: Optional[float] = None
         self._last_known_box: Optional[Tuple[int, int, int, int]] = None
+        self._item_card_cooldown_until = 0.0
 
         # "Session" state -- everything observed for the current loot
         # popup instance, accumulated additively across repeated OCR
@@ -430,6 +502,13 @@ class LootDetector:
         self._health_bar_box: Optional[Tuple[int, int, int, int]] = None
         self._health_zero_since: Optional[float] = None
         self._health_absent_since: Optional[float] = None
+        self._health_last_fraction: float = 1.0
+        # Canonical name of the boss currently being tracked (see
+        # _detect_boss_name) -- lets _try_reacquire_tracked_boss confirm
+        # a re-found bar belongs to the SAME encounter before re-locking
+        # onto it, rather than accidentally adopting a different boss's
+        # bar as if it were a continuation of this one.
+        self._health_bar_target_name: Optional[str] = None
         # Rate-limits the expensive OCR-driven candidate match in
         # _scan_health_bar to at most once every
         # HEALTH_CANDIDATE_OCR_INTERVAL_S while no boss is being tracked
@@ -606,6 +685,11 @@ class LootDetector:
         # drop; see GitHub issue #7), so this must never be skipped just
         # because a chest recently closed nearby.
         self._scan_health_bar(frame, now)
+
+        # Also independent of the loot-popup cooldown -- a player can
+        # inspect an item's detail card at any time, unrelated to
+        # whether a chest is currently open.
+        self._scan_item_stat_card(frame, now)
 
         if now < self._cooldown_until:
             return
@@ -942,6 +1026,168 @@ class LootDetector:
         return None
 
     # ------------------------------------------------------------------
+    # Item detail-card detection + OCR (see ITEM_CARD_* constants'
+    # calibration note -- this is a first pass, not yet confirmed
+    # against real in-game captures)
+    # ------------------------------------------------------------------
+    def _find_item_stat_card(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Same parchment-blob connected-component approach as
+        _find_loot_window, but filtering for a TALL/NARROW shape instead
+        of a wide one (see ITEM_CARD_MIN_HEIGHT_TO_WIDTH_RATIO), since
+        the item detail card and the loot popup are visually different
+        shapes despite sharing the same parchment texture. Deliberately
+        a separate method rather than a shared one with a shape
+        parameter -- keeps each detector's tuning/behavior independent
+        so recalibrating one (see the calibration note on the
+        ITEM_CARD_* constants) can never accidentally affect the other,
+        already-working one.
+        """
+        h, w = frame.shape[0], frame.shape[1]
+        mask = self._parchment_mask(frame)
+
+        total_matching = int(mask.sum())
+        min_required = ITEM_CARD_MIN_REGION_FRACTION * h * w
+        if total_matching < min_required:
+            return None
+
+        try:
+            from scipy import ndimage
+        except Exception as e:
+            self.on_error(f"scipy is required for detection but failed to load: {e}")
+            return None
+
+        labeled, num_features = ndimage.label(mask)
+        if num_features == 0:
+            return None
+
+        sizes = ndimage.sum(mask, labeled, index=range(1, num_features + 1))
+        order = np.argsort(sizes)[::-1]
+
+        for idx in order:
+            size = sizes[idx]
+            if size < min_required:
+                break
+
+            comp_id = idx + 1
+            ys, xs = np.where(labeled == comp_id)
+            y1, y2 = int(ys.min()), int(ys.max())
+            x1, x2 = int(xs.min()), int(xs.max())
+
+            box_w, box_h = max(1, x2 - x1), max(1, y2 - y1)
+            box_area = box_w * box_h
+            fill_ratio = size / box_area
+            if fill_ratio < 0.4:
+                continue
+            if box_h / box_w < ITEM_CARD_MIN_HEIGHT_TO_WIDTH_RATIO:
+                continue  # too wide/short to be the tall item card -- likely the loot popup instead
+
+            print(f"[TLOPO detect] item-card candidate at ({x1},{y1})-({x2},{y2}) "
+                  f"size={int(size)}px fill_ratio={fill_ratio:.2f}", flush=True)
+
+            side_pad = int(box_w * 0.03)
+            vert_pad = int(box_h * 0.02)
+            x1 = max(0, x1 - side_pad)
+            x2 = min(w, x2 + side_pad)
+            y1 = max(0, y1 - vert_pad)
+            y2 = min(h, y2 + vert_pad)
+            return (x1, y1, x2, y2)
+
+        return None
+
+    def _parse_item_stat_card(self, lines: List[str]) -> dict:
+        """
+        Pulls whatever stat fields it can find out of a list of OCR'd
+        text lines from an item detail card (see ITEM_CARD_*_RE's
+        calibration note). Returns only the fields it actually found --
+        an item with no weapon skill (clothing, jewelry, etc.) simply
+        won't have weapon_skill_name/_rank/attack keys at all, which is
+        expected and fine; the backend's /submit_item_stats treats
+        missing fields as "not on this item's card," not an error.
+        """
+        result: dict = {}
+        boosts: dict = {}
+
+        for i, line in enumerate(lines):
+            m = ITEM_CARD_ATTACK_RE.search(line)
+            if m and "attack" not in result:
+                result["attack"] = int(m.group(1))
+                continue
+
+            m = ITEM_CARD_LEVEL_REQ_RE.search(line)
+            if m and "level_requirement" not in result:
+                result["level_requirement"] = int(m.group(1))
+                continue
+
+            m = ITEM_CARD_BOOST_RE.search(line)
+            if m:
+                boosts[m.group(1).strip().title()] = int(m.group(2))
+                continue
+
+            m = ITEM_CARD_SKILL_RANK_RE.search(line)
+            if m and "weapon_skill_rank" not in result:
+                result["weapon_skill_rank"] = int(m.group(1))
+                # The skill name is the line immediately before "Rank N"
+                # on the reference card -- not itself pattern-matchable,
+                # so it's taken positionally rather than via its own regex.
+                if i > 0 and lines[i - 1].strip():
+                    result["weapon_skill_name"] = lines[i - 1].strip()
+
+        if boosts:
+            result["boosts"] = boosts
+
+        return result
+
+    def _scan_item_stat_card(self, frame: np.ndarray, now: float) -> None:
+        """
+        Independent of the loot-popup/health-bar scanners -- a player
+        can open an item's detail card at any time regardless of
+        whether a chest or boss fight is active. Runs its own cooldown
+        (ITEM_CARD_RESCAN_COOLDOWN_S) rather than sharing the loot
+        popup's, since these are unrelated UI elements that could
+        legitimately both be on screen at different moments close
+        together.
+        """
+        if now < self._item_card_cooldown_until:
+            return
+
+        box = self._find_item_stat_card(frame)
+        if box is None:
+            return
+
+        x1, y1, x2, y2 = box
+        crop = frame[y1:y2, x1:x2]
+        lines_with_boxes = self._ocr_lines_with_boxes(crop)
+        if not lines_with_boxes:
+            self._item_card_cooldown_until = now + ITEM_CARD_RESCAN_COOLDOWN_S
+            return
+
+        lines = [text for text, _, _ in lines_with_boxes]
+        # First non-empty OCR line is the item's own name/title, same
+        # position as every other card layout on screen -- reused as the
+        # lookup key for is_item_confirmed and the payload's item_name.
+        item_name = next((t.strip() for t in lines if t.strip()), None)
+        if not item_name:
+            self._item_card_cooldown_until = now + ITEM_CARD_RESCAN_COOLDOWN_S
+            return
+
+        if self.is_item_confirmed and self.is_item_confirmed(item_name):
+            print(f"[TLOPO detect] item card for {item_name!r} skipped -- already confirmed", flush=True)
+            self._item_card_cooldown_until = now + ITEM_CARD_RESCAN_COOLDOWN_S
+            return
+
+        stats = self._parse_item_stat_card(lines)
+        self._item_card_cooldown_until = now + ITEM_CARD_RESCAN_COOLDOWN_S
+
+        if not stats:
+            print(f"[TLOPO detect] item card for {item_name!r} found but no stat fields parsed", flush=True)
+            return
+
+        print(f"[TLOPO detect] item card OCR'd for {item_name!r}: {stats}", flush=True)
+        if self.on_item_stats_detected:
+            self.on_item_stats_detected({"item_name": item_name, **stats})
+
+    # ------------------------------------------------------------------
     # Boss health bar detection + kill state machine (see
     # HEALTH_DEFEATED_CONFIRM_SECONDS and GitHub issue #7)
     # ------------------------------------------------------------------
@@ -1126,15 +1372,31 @@ class LootDetector:
 
     def _health_bar_density(self, fill_mask: np.ndarray, track_mask: np.ndarray, box) -> Tuple[bool, float]:
         """
-        Lenient check used ONLY while a bar is already being tracked, at
-        a fixed box (the nameplate/bar cluster is a fixed HUD element,
-        not one that moves frame to frame): is there still enough
-        combined fill+track coverage in that exact spot to say the bar
-        element is still genuinely on screen? This is deliberately NOT a
-        fresh connected-component search (see _find_health_bar_
-        candidates) -- it just recomputes fill/track pixel counts within
-        the box already known to be the bar. Returns (still_present,
-        fill_fraction).
+        Lenient check used ONLY while a bar is already being tracked: is
+        there still enough combined fill+track coverage to say the bar
+        element is still genuinely on screen? Deliberately NOT a fresh
+        connected-component search over the whole frame (see
+        _find_health_bar_candidates) -- it works within the row band
+        (y1:y2) and LEFT edge (x1) of the box already known to be the
+        bar, both of which are fixed HUD positioning that doesn't move
+        frame to frame.
+
+        The RIGHT edge is NOT trusted as fixed, though -- confirmed from
+        real play (a boss brought down to "red" but not finished getting
+        wrongly counted as a kill): the bar's on-screen width shrinks as
+        the boss loses health, rather than draining left-to-right within
+        a constant-width bar. Re-checking density inside the original
+        (now stale, too-wide) box meant the box increasingly covered
+        background pixels that match neither fill nor track color as the
+        real bar narrowed, collapsing both the presence density AND the
+        fill fraction toward zero well before the boss was actually
+        dead. Instead, this re-derives the bar's CURRENT right edge each
+        call the same way _extend_track_right does (walk rightward from
+        the left edge, stop once several consecutive columns miss), then
+        computes the fill fraction from that live extent. A real
+        disappearance now shows up as no bar-colored pixels found even
+        right at the fixed left edge, not as a shrunk-then-hollow box.
+        Returns (still_present, fill_fraction).
         """
         x1, y1, x2, y2 = box
         h, w = fill_mask.shape[0], fill_mask.shape[1]
@@ -1142,13 +1404,34 @@ class LootDetector:
         x2, y2 = min(w, x2), min(h, y2)
         if x2 <= x1 or y2 <= y1:
             return False, 0.0
-        fill_count = int(fill_mask[y1:y2, x1:x2].sum())
-        track_count = int(track_mask[y1:y2, x1:x2].sum())
-        denom = fill_count + track_count
-        box_area = max(1, (y2 - y1) * (x2 - x1))
-        if denom / box_area < HEALTH_BAR_PRESENCE_DENSITY:
+        bar_h = y2 - y1
+        combined = fill_mask | track_mask
+
+        col = x1
+        gap = 0
+        right_edge = x1
+        while col < x2:
+            if int(combined[y1:y2, col].sum()) >= 0.5 * bar_h:
+                right_edge = col + 1
+                gap = 0
+            else:
+                gap += 1
+                if gap > 3:
+                    break
+            col += 1
+
+        # Nothing bar-colored right at the fixed left edge -- the HUD
+        # element itself is gone, not just narrowed.
+        edge_check_end = min(x2, x1 + 3)
+        if int(combined[y1:y2, x1:edge_check_end].sum()) < 0.5 * bar_h * (edge_check_end - x1):
             return False, 0.0
-        return True, (fill_count / denom if denom else 0.0)
+
+        fill_count = int(fill_mask[y1:y2, x1:right_edge].sum())
+        track_count = int(track_mask[y1:y2, x1:right_edge].sum())
+        denom = fill_count + track_count
+        if denom == 0:
+            return False, 0.0
+        return True, fill_count / denom
 
     def _scan_health_bar(self, frame: np.ndarray, now: float) -> None:
         """
@@ -1173,9 +1456,22 @@ class LootDetector:
                 if self._health_absent_since is None:
                     self._health_absent_since = now
                 elif now - self._health_absent_since >= HEALTH_DEFEATED_CONFIRM_SECONDS:
-                    self._confirm_kill(reason="bar disappeared")
+                    if self._health_last_fraction <= HEALTH_BAR_DISAPPEAR_MAX_FRACTION:
+                        self._confirm_kill(reason="bar disappeared")
+                    elif self._try_reacquire_tracked_boss(frame, fill_mask, track_mask):
+                        pass  # re-locked onto the same boss's bar at a new position -- not lost, not a kill
+                    else:
+                        print(f"[TLOPO detect] boss health bar disappeared with "
+                              f"fraction={self._health_last_fraction:.2f} still remaining -- "
+                              f"treating as target lost, not a kill", flush=True)
+                        self._health_bar_present = False
+                        self._health_bar_box = None
+                        self._health_zero_since = None
+                        self._health_absent_since = None
+                        self._health_bar_target_name = None
                 return
             self._health_absent_since = None
+            self._health_last_fraction = fraction
 
             if fraction <= 0.0:
                 if self._health_zero_since is None:
@@ -1240,9 +1536,56 @@ class LootDetector:
             self._health_bar_box = box
             self._health_zero_since = None
             self._health_absent_since = None
+            self._health_last_fraction = fraction
+            self._health_bar_target_name = name
             if self.on_target_detected:
                 self.on_target_detected(name)
             return
+
+    def _try_reacquire_tracked_boss(
+        self, frame: np.ndarray, fill_mask: np.ndarray, track_mask: np.ndarray,
+    ) -> bool:
+        """
+        Called right before giving up on a tracked boss whose bar
+        vanished with substantial health still showing (see
+        HEALTH_BAR_DISAPPEAR_MAX_FRACTION -- that threshold itself is
+        NOT touched here, so the documented anti-false-positive
+        protection it provides is unchanged). A real, observed cause of
+        that situation is the tracked box becoming briefly invalid --
+        the camera panned, or another player's nameplate/health bar
+        (there are often several on screen at once, e.g. "Mutineer
+        Ghost", crew bars) transiently overlapped it -- while the SAME
+        boss is still alive elsewhere on screen, not actually dead.
+
+        Runs one fresh candidate search + nameplate match (bypassing the
+        normal untracked-mode throttle, since this only runs once per
+        already-rare "about to declare target lost" event, not on every
+        poll -- so it doesn't reintroduce the GitHub issue #9 regression
+        HEALTH_CANDIDATE_OCR_INTERVAL_S guards against elsewhere) and
+        re-locks onto the SAME boss's bar at its new position if found,
+        silently continuing the existing tracking session -- no
+        duplicate kill, no re-fired on_target_detected, since this is
+        the same encounter, not a fresh one.
+
+        Returns False (caller proceeds to "target lost") if no bar
+        matching the currently-tracked boss's name is found.
+        """
+        if self._health_bar_target_name is None:
+            return False
+        candidates = self._find_health_bar_candidates(frame, fill_mask, track_mask)
+        for box, fraction in candidates:
+            if fraction <= 0.0:
+                continue
+            name = self._detect_boss_name(frame, box)
+            if name == self._health_bar_target_name:
+                print(f"[TLOPO detect] reacquired {name!r}'s health bar at new position "
+                      f"{box} (fill={fraction:.2f}) -- was briefly obscured, not lost/killed", flush=True)
+                self._health_bar_box = box
+                self._health_last_fraction = fraction
+                self._health_absent_since = None
+                self._health_zero_since = None
+                return True
+        return False
 
     def _confirm_kill(self, reason: str) -> None:
         print(f"[TLOPO detect] boss health bar kill confirmed ({reason})", flush=True)
@@ -1250,6 +1593,8 @@ class LootDetector:
         self._health_bar_box = None
         self._health_zero_since = None
         self._health_absent_since = None
+        self._health_last_fraction = 1.0
+        self._health_bar_target_name = None
         if self.on_kill_detected:
             self.on_kill_detected()
 
@@ -1285,7 +1630,7 @@ class LootDetector:
         # "Remington the Vicious Lv28") -- strip it out either way before
         # matching, same pattern NAMEPLATE_LEVEL_RE is used for elsewhere.
         text = " ".join(
-            NAMEPLATE_LEVEL_RE.sub("", t).strip() for t, _ in lines
+            NAMEPLATE_LEVEL_RE.sub("", t).strip() for t, _, _ in lines
         ).strip()
         name = match_known_boss_name(text)
         if name:
@@ -1323,7 +1668,7 @@ class LootDetector:
 
         lines = self._ocr_lines_with_boxes(win)
         print(f"[TLOPO detect] OCR read {len(lines)} line(s): "
-              f"{[t for t, _ in lines]}", flush=True)
+              f"{[t for t, _, _ in lines]}", flush=True)
         if not lines:
             return None
 
@@ -1333,8 +1678,12 @@ class LootDetector:
         rating_box: Optional[tuple] = None
         numeric_lines: List[Tuple[int, tuple]] = []
         name_candidates: List[Tuple[str, tuple]] = []
+        # box -> whole-window OCR confidence (0-100), used as a fallback
+        # for LootItem.name_confidence when the targeted re-OCR pass below
+        # (_reread_item_name) doesn't produce a usable reread.
+        box_confidence: dict = {}
 
-        for text, box in lines:
+        for text, box, conf in lines:
             stripped = text.strip()
             lower = stripped.lower()
 
@@ -1385,6 +1734,7 @@ class LootDetector:
                 continue
 
             name_candidates.append((stripped, box))
+            box_confidence[box] = conf
 
         if chest_type is None:
             # Not actually a loot window (could be some other parchment UI,
@@ -1475,23 +1825,37 @@ class LootDetector:
             # Denim") -- re-OCR'ing each original single-line box avoids
             # that since every single-line reread in testing has been
             # reliable; only the multi-line blob re-read was not.
+            name_confidence: Optional[float] = None
             if len(sub_boxes) > 1:
                 part_rereads = [self._reread_item_name(win, sub_box) for sub_box in sub_boxes]
                 print(f"[TLOPO detect] targeted re-OCR for merged name {name!r}: "
                       f"per-line rereads={part_rereads!r}", flush=True)
                 if all(part_rereads):
-                    reread = " ".join(part_rereads)
+                    reread = " ".join(t for t, _ in part_rereads)
+                    # Weakest-link confidence across the merged lines --
+                    # the merged name is only as trustworthy as its least
+                    # confidently-read half.
+                    name_confidence = min(c for _, c in part_rereads)
                 else:
                     reread = None
             else:
-                reread = self._reread_item_name(win, box)
+                single_reread = self._reread_item_name(win, box)
+                reread = single_reread[0] if single_reread else None
+                if single_reread:
+                    name_confidence = single_reread[1]
                 print(f"[TLOPO detect] targeted re-OCR for {name!r}: reread={reread!r}", flush=True)
 
             if reread and len(reread) >= len(name) - 2:
                 name = reread
+            else:
+                # Reread wasn't used (missing or too short) -- fall back
+                # to the whole-window pass's own confidence for this box.
+                name_confidence = box_confidence.get(box)
 
-            print(f"[TLOPO detect] candidate {name!r} sampled color={color} -> rarity={rarity}", flush=True)
-            items.append(LootItem(name=name, rarity=rarity))
+            category = classify_item_category(name)
+            print(f"[TLOPO detect] candidate {name!r} sampled color={color} -> rarity={rarity} "
+                  f"confidence={name_confidence} category={category}", flush=True)
+            items.append(LootItem(name=name, rarity=rarity, name_confidence=name_confidence, category=category))
 
         target = self.active_target_getter() if self.active_target_getter else ""
         kill_number = self.kill_number_getter() if self.kill_number_getter else 0
@@ -1676,15 +2040,17 @@ class LootDetector:
     # ------------------------------------------------------------------
     # OCR helpers
     # ------------------------------------------------------------------
-    def _ocr_lines_with_boxes(self, crop: np.ndarray) -> List[Tuple[str, tuple]]:
+    def _ocr_lines_with_boxes(self, crop: np.ndarray) -> List[Tuple[str, tuple, float]]:
         """
-        Returns list of (text, bounding_box) using easyocr. bounding_box
-        is (x1, y1, x2, y2) relative to `crop` at its ORIGINAL resolution
-        -- OCR itself runs on an upscaled copy for better accuracy on
-        small text (see OCR_UPSCALE_FACTOR), but the returned boxes are
-        scaled back down so every caller can keep treating coordinates
-        as relative to the original, unscaled crop with no other changes
-        needed.
+        Returns list of (text, bounding_box, confidence) using easyocr.
+        bounding_box is (x1, y1, x2, y2) relative to `crop` at its
+        ORIGINAL resolution -- OCR itself runs on an upscaled copy for
+        better accuracy on small text (see OCR_UPSCALE_FACTOR), but the
+        returned boxes are scaled back down so every caller can keep
+        treating coordinates as relative to the original, unscaled crop
+        with no other changes needed. confidence is EasyOCR's own
+        per-detection score, rescaled from its native 0-1 range to 0-100
+        (see loot_parser.LootItem.name_confidence).
         """
         if crop.size == 0 or self._ocr_reader is None:
             return []
@@ -1718,19 +2084,22 @@ class LootDetector:
                 min(w, round(max(xs)) + pad),
                 min(h, round(max(ys)) + pad),
             )
-            out.append((text, box))
+            out.append((text, box, conf * 100.0))
         return out
 
-    def _reread_item_name(self, win: np.ndarray, box: tuple) -> Optional[str]:
+    def _reread_item_name(self, win: np.ndarray, box: tuple) -> Optional[Tuple[str, float]]:
         """
         Re-runs OCR on just this item's name box (cropped tightly with a
         small margin, upscaled far more aggressively than the whole-
         window pass since it's now a small image), to get a cleaner read
         of the name specifically. See NAME_REREAD_UPSCALE_FACTOR for why
         this matters more for item names than for other text. Returns
-        the cleaned combined text if anything was read, else None --
-        callers should keep the original whole-window OCR text as a
-        fallback when this returns None.
+        (cleaned combined text, confidence 0-100) if anything was read,
+        else None -- callers should keep the original whole-window OCR
+        text/confidence as a fallback when this returns None. Confidence
+        is the minimum across all fragments that make up the combined
+        name (weakest-link, not an average) so a multi-word name isn't
+        reported as more trustworthy than its least-clear word.
         """
         if self._ocr_reader is None:
             return None
@@ -1768,12 +2137,16 @@ class LootDetector:
         # Electric Blue Denim" in testing. Sort by Y (top-to-bottom) first,
         # then X (left-to-right within a line), matching normal reading
         # order for both the single- and multi-line case.
-        fragments = [(bbox[0][1], bbox[0][0], text) for bbox, text, conf in results if conf >= 0.35]
+        fragments = [(bbox[0][1], bbox[0][0], text, conf) for bbox, text, conf in results if conf >= 0.35]
         if not fragments:
             return None
         fragments.sort(key=lambda f: (f[0], f[1]))
-        combined = " ".join(clean_item_name(t) for _, _, t in fragments if clean_item_name(t))
-        return combined.strip() or None
+        combined = " ".join(clean_item_name(t) for _, _, t, _ in fragments if clean_item_name(t))
+        combined = combined.strip()
+        if not combined:
+            return None
+        confidence = min(c for _, _, _, c in fragments) * 100.0
+        return combined, confidence
 
     def _sample_text_color(self, crop: np.ndarray, box: tuple) -> Optional[Tuple[int, int, int]]:
         """
