@@ -25,6 +25,7 @@ from tkinter import (
     LEFT, RIGHT, TOP, BOTTOM, X, Y, VERTICAL, HORIZONTAL, W, E,
     Checkbutton, BooleanVar, Scale,
 )
+from tkinter import font as tkfont
 
 from loot_parser import (
     ChestResult, LootItem, RARITY_ORDER, RARITY_DISPLAY_HEX,
@@ -68,6 +69,8 @@ PANEL_BG = "#262b33"
 FG = "#e8e6df"
 ACCENT = "#d8b25a"
 GREY = "#9a9a9a"
+FAMED_READABLE = "#7fa2ff"
+LEGENDARY_READABLE = "#ff7373"
 
 CONFIG_FILENAME = "tlopo_tracker_settings.json"
 
@@ -120,6 +123,7 @@ class TLOPOTrackerApp:
         self._build_style()
         self._maybe_restore_session()
         self._build_ui()
+        self._setup_font_scaling()
 
         self.detector = LootDetector(
             on_chest_detected=self._detector_on_chest,
@@ -157,11 +161,82 @@ class TLOPOTrackerApp:
 
     def _build_style(self):
         style = ttk.Style()
+        self._style = style
         try:
             style.theme_use("clam")
         except Exception:
             pass
         style.configure("TCombobox", fieldbackground=PANEL_BG, background=PANEL_BG)
+        style.configure("Tracker.TNotebook", background=BG, borderwidth=0)
+        style.configure(
+            "Tracker.TNotebook.Tab",
+            background=PANEL_BG,
+            foreground=GREY,
+            padding=(14, 7),
+            borderwidth=0,
+        )
+        style.map(
+            "Tracker.TNotebook.Tab",
+            background=[("selected", "#3a4150"), ("active", "#303640")],
+            foreground=[("selected", ACCENT), ("active", FG)],
+        )
+
+    def _setup_font_scaling(self):
+        """Scale the main UI's fonts as the tracker window grows."""
+        self.root.update_idletasks()
+        self._font_bases = []
+        self._font_scale_job = None
+
+        def collect(widget):
+            try:
+                configured_font = widget.cget("font")
+                details = tkfont.Font(root=self.root, font=configured_font).actual()
+                self._font_bases.append((widget, details))
+            except Exception:
+                pass
+            for child in widget.winfo_children():
+                collect(child)
+
+        collect(self.root)
+        self._loot_tag_font_bases = {
+            "Famed_bold": ("Consolas", 9, "bold"),
+            "Legendary_row": ("Consolas", 9, "bold"),
+        }
+        self.root.bind("<Configure>", self._schedule_font_scale, add="+")
+
+    def _schedule_font_scale(self, event):
+        if event.widget is not self.root:
+            return
+        if self._font_scale_job is not None:
+            self.root.after_cancel(self._font_scale_job)
+        self._font_scale_job = self.root.after(75, self._apply_font_scale)
+
+    @staticmethod
+    def _window_font_scale(window, base_width, base_height):
+        width_scale = window.winfo_width() / base_width
+        height_scale = window.winfo_height() / base_height
+        return max(1.0, min(1.75, width_scale, height_scale))
+
+    @staticmethod
+    def _scale_widget_fonts(font_bases, scale):
+        for widget, details in font_bases:
+            try:
+                size = max(8, round(abs(details["size"]) * scale))
+                widget.configure(font=(
+                    details["family"], size, details["weight"], details["slant"]
+                ))
+            except Exception:
+                pass
+
+    def _apply_font_scale(self):
+        self._font_scale_job = None
+        scale = self._window_font_scale(self.root, WINDOW_W, WINDOW_H)
+        self._scale_widget_fonts(self._font_bases, scale)
+
+        tab_size = max(9, round(9 * scale))
+        self._style.configure("Tracker.TNotebook.Tab", font=("Segoe UI", tab_size, "bold"))
+        for tag, (family, base_size, weight) in self._loot_tag_font_bases.items():
+            self.loot_text.tag_configure(tag, font=(family, max(8, round(base_size * scale)), weight))
 
     # ------------------------------------------------------------------
     # Settings persistence
@@ -240,34 +315,34 @@ class TLOPOTrackerApp:
 
         import tkinter as tk
         self._canvas = tk.Canvas(canvas_frame, bg=BG, highlightthickness=0)
-        vscroll = Scrollbar(canvas_frame, orient=VERTICAL, command=self._canvas.yview)
-        self._canvas.configure(yscrollcommand=vscroll.set)
-        vscroll.pack(side=RIGHT, fill=Y)
-        self._canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        self._canvas.pack(fill=BOTH, expand=True)
 
         self._scroll_frame = Frame(self._canvas, bg=BG)
         self._canvas_window = self._canvas.create_window((0, 0), window=self._scroll_frame, anchor="nw")
 
-        def _on_configure(_evt):
-            self._canvas.configure(scrollregion=self._canvas.bbox("all"))
-        self._scroll_frame.bind("<Configure>", _on_configure)
-
         def _on_canvas_resize(evt):
-            self._canvas.itemconfig(self._canvas_window, width=evt.width)
+            self._canvas.itemconfig(self._canvas_window, width=evt.width, height=evt.height)
         self._canvas.bind("<Configure>", _on_canvas_resize)
 
-        def _on_mousewheel(evt):
-            self._canvas.yview_scroll(int(-1 * (evt.delta / 120)), "units")
-        self._canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        self.notebook = ttk.Notebook(self._scroll_frame, style="Tracker.TNotebook")
+        self.notebook.pack(fill=BOTH, expand=True, padx=8, pady=8)
 
-        parent = self._scroll_frame
-        self._build_status_bar(parent)
-        self._build_target_selector(parent)
-        self._build_kill_chest_counters(parent)
-        self._build_loot_log(parent)
-        self._build_named_items_panel(parent)
-        self._build_session_summary(parent)
-        self._build_export_controls(parent)
+        session_tab = Frame(self.notebook, bg=BG)
+        loot_tab = Frame(self.notebook, bg=BG)
+        summary_tab = Frame(self.notebook, bg=BG)
+        self.notebook.add(session_tab, text="Session")
+        self.notebook.add(loot_tab, text="Loot")
+        self.notebook.add(summary_tab, text="Summary")
+
+        self._build_status_bar(session_tab)
+        self._build_target_selector(session_tab)
+        self._build_kill_chest_counters(session_tab)
+
+        self._build_loot_log(loot_tab)
+        self._build_named_items_panel(loot_tab)
+
+        self._build_session_summary(summary_tab)
+        self._build_export_controls(summary_tab)
 
     def _build_top_bar(self):
         bar = Frame(self.root, bg=BG)
@@ -424,14 +499,14 @@ class TLOPOTrackerApp:
         self.famed_header_var = StringVar(value="FAMED DROPS — 0 total")
         Label(frame, textvariable=self.famed_header_var, bg=PANEL_BG, fg=RARITY_DISPLAY_HEX["Famed"],
               font=("Segoe UI", 9, "bold")).pack(anchor=W, padx=6, pady=(6, 0))
-        self.famed_listbox = Listbox(frame, height=4, bg="#15181d", fg=RARITY_DISPLAY_HEX["Famed"],
+        self.famed_listbox = Listbox(frame, height=4, bg="#15181d", fg=FAMED_READABLE,
                                       relief="flat", font=("Consolas", 9), selectmode="browse")
         self.famed_listbox.pack(fill=X, padx=6, pady=(2, 6))
 
         self.legendary_header_var = StringVar(value="LEGENDARY DROPS — 0 total")
         Label(frame, textvariable=self.legendary_header_var, bg=PANEL_BG, fg=RARITY_DISPLAY_HEX["Legendary"],
               font=("Segoe UI", 9, "bold")).pack(anchor=W, padx=6, pady=(0, 0))
-        self.legendary_listbox = Listbox(frame, height=4, bg="#15181d", fg=RARITY_DISPLAY_HEX["Legendary"],
+        self.legendary_listbox = Listbox(frame, height=4, bg="#15181d", fg=LEGENDARY_READABLE,
                                           relief="flat", font=("Consolas", 9, "bold"), selectmode="browse")
         self.legendary_listbox.pack(fill=X, padx=6, pady=(2, 6))
 
@@ -817,7 +892,7 @@ class TLOPOTrackerApp:
         parent.bind("<Configure>", _on_configure)
 
         def _on_canvas_resize(evt):
-            settings_canvas.itemconfig(canvas_window, width=evt.width)
+            settings_canvas.itemconfig(canvas_window, width=evt.width, height=evt.height)
         settings_canvas.bind("<Configure>", _on_canvas_resize)
 
         def _on_mousewheel(evt):
@@ -967,6 +1042,38 @@ class TLOPOTrackerApp:
 
         Button(button_frame, text="Save", command=save_and_close, bg=ACCENT, fg="#20242b",
                relief="flat", cursor="hand2").pack(pady=16)
+
+        # Settings is rebuilt on every open, so keep its captured fonts and
+        # pending resize job scoped to this Toplevel instance.
+        win.update_idletasks()
+        settings_font_bases = []
+
+        def collect_settings_fonts(widget):
+            try:
+                configured_font = widget.cget("font")
+                details = tkfont.Font(root=win, font=configured_font).actual()
+                settings_font_bases.append((widget, details))
+            except Exception:
+                pass
+            for child in widget.winfo_children():
+                collect_settings_fonts(child)
+
+        collect_settings_fonts(win)
+        settings_font_scale_job = [None]
+
+        def apply_settings_font_scale():
+            settings_font_scale_job[0] = None
+            scale = self._window_font_scale(win, 420, 600)
+            self._scale_widget_fonts(settings_font_bases, scale)
+
+        def schedule_settings_font_scale(event):
+            if event.widget is not win:
+                return
+            if settings_font_scale_job[0] is not None:
+                win.after_cancel(settings_font_scale_job[0])
+            settings_font_scale_job[0] = win.after(75, apply_settings_font_scale)
+
+        win.bind("<Configure>", schedule_settings_font_scale, add="+")
 
     # ------------------------------------------------------------------
     # Shutdown
